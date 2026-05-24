@@ -1,0 +1,14 @@
+apiVersion: v2
+name: openai-router
+description: High-performance OpenAI-compatible API proxy with rate limiting, fail2ban, sticky sessions, and multi-instance sync via Redis
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - openai
+  - proxy
+  - router
+  - llm
+  - api-gateway
+maintainers:
+  - name: openai-router

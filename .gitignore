@@ -1,0 +1,30 @@
+# Build
+/target/
+*.o
+*.so
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Config (contains secrets — use config.example.yaml as template)
+config.yaml
+config_test.yaml
+config_minimal.yaml
+config_deepseek.yaml
+config_f2b_test.yaml
+
+# Docker volumes
+docker/pg_data/
+docker/valkey_data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+*.env.local

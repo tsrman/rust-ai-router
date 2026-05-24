@@ -1,0 +1,10 @@
+target/
+.git/
+.hermes/
+*.md
+*.yaml
+!docker/config_docker.yaml
+docker/docker-compose.yml
+docker/nginx.conf
+docker/Dockerfile
+docker/.dockerignore

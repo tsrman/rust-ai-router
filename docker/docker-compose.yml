@@ -1,0 +1,85 @@
+# openai-router — Docker Compose stack (3-instance cluster)
+# Запуск из корня проекта:
+#   docker compose -f docker/docker-compose.yml up -d
+#   docker compose -f docker/docker-compose.yml --profile stats up -d
+#   docker compose -f docker/docker-compose.yml down -v
+
+x-router-template: &router-template
+  image: openai-router:latest
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  environment:
+    - RUST_LOG=info
+  volumes:
+    - ./config_docker.yaml:/app/config.yaml:ro
+  depends_on:
+    valkey:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+      required: false
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 3
+
+services:
+  # ── openai-router × 3 ──────────────────────────────────────────────────
+  router1:
+    <<: *router-template
+
+  router2:
+    <<: *router-template
+
+  router3:
+    <<: *router-template
+
+  # ── Valkey (Redis-compatible) ─────────────────────────────────────────
+  valkey:
+    image: valkey/valkey:8-alpine
+    command: valkey-server --save "" --appendonly no --maxmemory 128mb --maxmemory-policy volatile-lru
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+    restart: unless-stopped
+
+  # ── PostgreSQL (profile: stats) ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["stats"]
+    environment:
+      POSTGRES_USER: oar
+      POSTGRES_PASSWORD: change-me-in-production
+      POSTGRES_DB: openai_router
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oar -d openai_router"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ── nginx ─────────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - router1
+      - router2
+      - router3
+    restart: unless-stopped
+
+volumes:
+  valkey_data:
+  pg_data:

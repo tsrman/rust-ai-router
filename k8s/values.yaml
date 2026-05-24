@@ -1,0 +1,87 @@
+# openai-router Helm chart values
+
+replicaCount: 3
+
+image:
+  repository: openai-router
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  host: api.example.com
+  tls: []
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Valkey (Redis-compatible) sidecar for sync
+valkey:
+  enabled: true
+  image: valkey/valkey:8-alpine
+  args: ["--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lru"]
+
+# PostgreSQL for stats
+postgres:
+  enabled: true
+  image: postgres:16-alpine
+  database: openai_router
+  username: oar
+  # password is set via secret
+  storage: 10Gi
+
+# Router configuration (will be mounted as config.yaml)
+config:
+  server:
+    listen: "0.0.0.0:8080"
+    timeouts:
+      client_idle_secs: 60
+      client_read_secs: 30
+      upstream_connect_secs: 10
+      upstream_read_secs: 300
+
+  teams:
+    - name: "default"
+      models: ["deepseek-chat"]
+
+  tokens:
+    - key: "sk-change-me"
+      team: "default"
+
+  models:
+    - name: "deepseek-chat"
+      endpoints:
+        - url: "https://api.deepseek.com"
+          key: "sk-your-deepseek-key"
+
+  fail2ban:
+    max_failures: 5
+    ban_duration_secs: 60
+    error_threshold_pct: 0.5
+    fail_status_codes: ["5xx", "401", "403", "429"]
+    health_check_interval_secs: 30
+    retry_on_failure: true
+
+  session:
+    sticky_ttl_secs: 300
+
+  sync:
+    enabled: true
+    redis_url: "redis://valkey:6379/0"
+    key_prefix: "oar"
+
+  stats:
+    enabled: true
+    postgres_url: "postgres://oar:change-me-in-production@postgres:5432/openai_router"
+    retention_days: 30
+    cleanup_interval_secs: 3600
+    aggregation_interval_secs: 300

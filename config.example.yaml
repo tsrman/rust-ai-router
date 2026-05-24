@@ -1,0 +1,370 @@
+# =============================================================================
+# openai-router — Configuration Reference
+# =============================================================================
+# Copy this file to config.yaml and replace placeholder values with real ones.
+#
+# Quick start:
+#   1. Copy:  cp config.example.yaml config.yaml
+#   2. Edit:  replace API keys and token secrets
+#   3. Run:   ./target/release/openai-router config.yaml
+#   4. Test:  curl -H "Authorization: Bearer sk-admin-xxx" localhost:8080/v1/models
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# SERVER — network bind settings
+# ---------------------------------------------------------------------------
+server:
+  listen: "0.0.0.0:8080"      # IP:port to listen on
+  # listen: "127.0.0.1:3000"  # localhost only, port 3000
+  # listen: "[::]:8080"       # IPv6 all interfaces
+  base_path: ""               # Sub-URL prefix, e.g. "/rustrouter" or "/api/v2"
+  # base_path: "/rustrouter"  # → /rustrouter/v1/models, /rustrouter/health, ...
+  # ── Таймауты (все значения в секундах, 0 = безлимит) ──
+  timeouts:
+    client_idle_secs: 60          # Keep-alive / idle timeout для клиентов
+    client_read_secs: 30          # Таймаут на полный цикл запроса
+    upstream_connect_secs: 10     # Таймаут подключения к upstream
+    upstream_read_secs: 300       # Таймаут чтения ответа от upstream (важно для streaming!)
+    upstream_write_secs: 60       # Таймаут отправки запроса в upstream
+
+# ===========================================================================
+# TEAMS — user groups with shared access and limits
+# ===========================================================================
+#
+# Teams define what models a group of users can access and what rate limits
+# they have. Tokens inherit from teams (see TOKENS section below).
+#
+# Inheritance: token.field overrides team.field. Team.field is the fallback.
+#
+teams:
+
+  # --- Admin team: full access, high limits ---
+  - name: "admin"
+    models: ["*"]              # "*" = access to ALL models
+    limits:
+      rpm: 10000               # Requests per minute (0 = unlimited)
+      tpm: 5000000             # Tokens per minute  (0 = unlimited)
+    cost_multiplier: 1.0       # Billing multiplier (1.0 = no markup)
+
+  # --- Developers: core models, moderate limits ---
+  - name: "developers"
+    models:                    # Explicit model list
+      - "gpt-4o"
+      - "gpt-4o-mini"
+      - "gpt-3.5-turbo"
+      - "claude-3-haiku"
+    limits:
+      rpm: 500
+      tpm: 200000
+
+  # --- Basic: cheapest models only ---
+  - name: "basic"
+    models: ["gpt-4o-mini", "gpt-3.5-turbo"]
+    limits:
+      rpm: 100
+      tpm: 50000
+
+  # --- Team without explicit limits (0 = unlimited) ---
+  # - name: "unlimited-readonly"
+  #   models: ["gpt-4o-mini"]
+  #   # limits: not set → rpm=0, tpm=0 → UNLIMITED
+
+# ===========================================================================
+# TOKENS — client API keys for authentication
+# ===========================================================================
+#
+# Each token:
+#   - MUST have a unique 'key'
+#   - MUST belong to a 'team' (defined above)
+#   - MAY override team's 'models' and/or 'limits'
+#
+# Inheritance priority: token > team > default (0 / ["*"])
+#
+tokens:
+
+  # --- Admin token: inherits everything from "admin" team ---
+  - key: "sk-admin-secret-change-me-in-production"
+    team: "admin"
+    # models:   inherited → ["*"]
+    # rpm:      inherited → 10000
+    # tpm:      inherited → 5000000
+
+  # --- Developer token: overrides RPM, inherits models and TPM ---
+  - key: "sk-dev-key-change-me"
+    team: "developers"
+    limits:
+      rpm: 1000                # Override: 1000 RPM (team has 500)
+    # models:   inherited → ["gpt-4o", "gpt-4o-mini", "gpt-3.5-turbo", "claude-3-haiku"]
+    # tpm:      inherited → 200000
+
+  # --- Basic user: full inheritance ---
+  - key: "sk-basic-user-key-change-me"
+    team: "basic"
+    # All fields inherited from "basic" team
+
+  # --- Power user: overrides both models and limits ---
+  - key: "sk-power-user-key-change-me"
+    team: "basic"               # Base team for inheritance
+    models: ["gpt-4o", "gpt-4o-mini"]   # Override: extra model access
+    limits:
+      rpm: 1000
+      tpm: 500000
+
+# ===========================================================================
+# MODELS — model definitions with upstream endpoints
+# ===========================================================================
+#
+# Each model has:
+#   - name:     canonical model name (used in API requests)
+#   - aliases:  alternative names that map to this model (optional)
+#   - endpoints: list of upstream backends (at least one required)
+#
+# Each endpoint has:
+#   - url:      upstream API base URL (e.g. https://api.openai.com)
+#   - key:      upstream API key
+#   - limits:   per-credential RPM/TPM (optional)
+#   - cost:     cost per 1M tokens in USD (optional, for billing headers)
+#   - weight:   load balancing weight, default 1 (optional)
+#   - headers:  extra HTTP headers to forward to upstream (optional)
+#
+models:
+
+  # =========================================================================
+  # GPT-4o — two endpoints for load balancing
+  # =========================================================================
+  - name: "gpt-4o"
+    aliases: ["gpt-4", "gpt-4-turbo", "gpt-4-vision", "gpt-4-vision-preview"]
+    endpoints:
+
+      # Endpoint 1: API key 1 (weight 1)
+      - url: "https://api.openai.com"
+        key: "sk-your-actual-openai-key-1-here"
+        limits:
+          rpm: 500
+          tpm: 200000
+        cost:
+          prompt: 2.50           # $2.50 per 1M prompt tokens
+          completion: 10.00       # $10.00 per 1M completion tokens
+        weight: 1
+
+      # Endpoint 2: API key 2 (weight 1 — equal traffic)
+      - url: "https://api.openai.com"
+        key: "sk-your-actual-openai-key-2-here"
+        limits:
+          rpm: 500
+          tpm: 200000
+        cost:
+          prompt: 2.50
+          completion: 10.00
+        weight: 1
+
+  # =========================================================================
+  # GPT-4o Mini — single endpoint
+  # =========================================================================
+  - name: "gpt-4o-mini"
+    aliases: ["gpt-4-mini"]
+    endpoints:
+      - url: "https://api.openai.com"
+        key: "sk-your-actual-openai-key-3-here"
+        limits:
+          rpm: 1000
+          tpm: 300000
+        cost:
+          prompt: 0.15
+          completion: 0.60
+
+  # =========================================================================
+  # GPT-3.5 Turbo — single endpoint
+  # =========================================================================
+  - name: "gpt-3.5-turbo"
+    aliases: ["gpt-3.5", "gpt-35-turbo"]
+    endpoints:
+      - url: "https://api.openai.com"
+        key: "sk-your-actual-openai-key-4-here"
+        limits:
+          rpm: 3500
+          tpm: 1000000
+        cost:
+          prompt: 0.50
+          completion: 1.50
+
+  # =========================================================================
+  # Claude 3 Haiku — Anthropic endpoint (OpenAI-compatible via proxy)
+  # =========================================================================
+  - name: "claude-3-haiku"
+    aliases: ["claude-3", "claude-haiku"]
+    endpoints:
+      - url: "https://api.anthropic.com"
+        key: "sk-ant-your-anthropic-api-key-here"
+        limits:
+          rpm: 100
+          tpm: 50000
+        cost:
+          prompt: 0.25
+          completion: 1.25
+
+  # =========================================================================
+  # Example: Azure OpenAI endpoint
+  # =========================================================================
+  # - name: "gpt-4o-azure"
+  #   endpoints:
+  #     - url: "https://your-resource.openai.azure.com"
+  #       key: "your-azure-api-key"
+  #       limits:
+  #         rpm: 100
+  #         tpm: 50000
+  #       headers:
+  #         api-key: "your-azure-api-key"   # Azure uses api-key header
+
+  # =========================================================================
+  # Example: Custom OpenAI-compatible server (vLLM, Ollama, LocalAI, etc.)
+  # =========================================================================
+  # - name: "llama-3-local"
+  #   endpoints:
+  #     - url: "http://localhost:8000"       # vLLM server
+  #       key: "not-needed"                 # No auth for local
+  #       cost:
+  #         prompt: 0.0
+  #         completion: 0.0
+
+  # =========================================================================
+  # Example: Weighted load balancing (2:1 ratio)
+  # =========================================================================
+  # - name: "gpt-4o-weighted"
+  #   endpoints:
+  #     - url: "https://api.openai.com"
+  #       key: "sk-primary-key"
+  #       weight: 2                         # Gets ~66% of traffic
+  #     - url: "https://api.openai.com"
+  #       key: "sk-secondary-key"
+  #       weight: 1                         # Gets ~33% of traffic
+
+# ===========================================================================
+# FAIL2BAN — automatic endpoint banning on errors
+# ===========================================================================
+#
+# Protects upstream providers from cascading failures. When an endpoint
+# returns too many errors, it's temporarily banned.
+#
+fail2ban:
+  max_failures: 5              # Consecutive failures before ban (default: 5)
+  ban_duration_secs: 60        # How long to ban (seconds, default: 60)
+  error_threshold_pct: 0.5     # Ban if error rate exceeds this (0.5 = 50%)
+  fail_status_codes: ["5xx", "401", "403", "429"]  # HTTP codes → failure
+  health_check_interval_secs: 30  # Background probe interval (0 = off)
+  retry_on_failure: true          # Retry on other endpoints when 5xx/429
+  # retry_on_failure: false       # Disable retries — return error immediately
+  # fail_status_codes: ["5xx", "429"]  # + upstream rate limit
+  # fail_status_codes: ["500", "502", "503"]  # exact codes
+  #
+  # What counts as a failure:
+  #   1. NETWORK ERRORS (always): connection refused, DNS failure,
+  #      TLS handshake error, timeout — always trigger fail2ban.
+  #   2. HTTP STATUS CODES (configurable via fail_status_codes):
+  #      "5xx"  = all 500-599  (default)
+  #      "4xx"  = all 400-499
+  #      "429"  = exact status code
+  #      "500"  = exact status code
+  #
+  # Two independent ban triggers:
+  #   1. CONSECUTIVE: after N failures in a row → immediate ban
+  #   2. ERROR RATE: over threshold% errors across >=10 requests → ban
+  #
+  # After ban_duration_secs, endpoint is automatically unbanned.
+  # Successful requests reset the consecutive failure counter.
+
+# ===========================================================================
+# SESSION — session-sticky routing
+# ===========================================================================
+#
+# When a request includes x-sticky-session-id in the body, the router
+# hashes the session ID to pick a fixed backend endpoint. This keeps
+# all requests in the same conversation on the same upstream provider,
+# maximising prompt cache hits and reducing costs.
+#
+# The binding expires after sticky_ttl_secs of inactivity.
+#
+session:
+  sticky_ttl_secs: 300           # Session binding TTL (default: 300s = 5 min)
+  # sticky_ttl_secs: 3600        # 1 hour for long conversations
+  # sticky_ttl_secs: 60          # 1 minute for quick back-and-forth
+
+# ===========================================================================
+# SYNC — multi-instance state sync via Redis/Valkey
+# ===========================================================================
+#
+# When enabled, rate limit counters, fail2ban state, and sticky sessions
+# are stored in Redis/Valkey — shared across all router instances.
+# Requires: cargo build --features redis-sync
+#
+sync:
+  enabled: false                                    # Set to true to enable
+  redis_url: "redis://valkey:6379/0"               # Redis/Valkey connection URL
+  key_prefix: "oar"                                 # Key prefix for isolation
+  # redis_url: "redis://user:pass@host:6379/1"     # With auth + db number
+  # key_prefix: "production"                        # Different per environment
+
+# ===========================================================================
+# STATS — optional PostgreSQL statistics
+# ===========================================================================
+#
+# Enable this to record request metrics to PostgreSQL.
+# Requires: cargo build --features postgres
+#
+stats:
+  enabled: false                                     # Set to true to enable
+  postgres_url: "postgres://user:***@localhost/openai_router"
+  retention_days: 30                                 # How long to keep stats (0 = keep forever)
+  cleanup_interval_secs: 3600                        # Cleanup interval in seconds (0 = disabled)
+  aggregation_interval_secs: 300                     # Batch aggregation interval in seconds (0 = disabled)
+  #
+  # Tables (auto-created):
+  #
+  # -- Raw requests
+  # CREATE TABLE requests (
+  #     id                BIGSERIAL PRIMARY KEY,
+  #     timestamp         TIMESTAMPTZ DEFAULT NOW(),
+  #     model             VARCHAR(255),
+  #     endpoint          VARCHAR(512),
+  #     team              VARCHAR(128) DEFAULT '',
+  #     tokens_prompt     BIGINT DEFAULT 0,
+  #     tokens_completion BIGINT DEFAULT 0,
+  #     latency_ms        BIGINT DEFAULT 0,
+  #     status            SMALLINT DEFAULT 200,
+  #     token_key_hash    VARCHAR(64)
+  # );
+  #
+  # -- Hourly aggregation per token (upsert)
+  # CREATE TABLE token_usage_hourly (
+  #     hour              TIMESTAMPTZ,
+  #     token_hash        VARCHAR(64),
+  #     team              VARCHAR(128) DEFAULT '',
+  #     requests          BIGINT DEFAULT 0,
+  #     tokens_prompt     BIGINT DEFAULT 0,
+  #     tokens_completion BIGINT DEFAULT 0,
+  #     cost_approx       DOUBLE PRECISION DEFAULT 0,
+  #     PRIMARY KEY (hour, token_hash)
+  # );
+  #
+  # -- Hourly aggregation per team (upsert)
+  # CREATE TABLE team_usage_hourly (
+  #     hour              TIMESTAMPTZ,
+  #     team              VARCHAR(128),
+  #     requests          BIGINT DEFAULT 0,
+  #     tokens_prompt     BIGINT DEFAULT 0,
+  #     tokens_completion BIGINT DEFAULT 0,
+  #     active_tokens     BIGINT DEFAULT 0,
+  #     cost_approx       DOUBLE PRECISION DEFAULT 0,
+  #     PRIMARY KEY (hour, team)
+  # );
+  #
+  # Indexes (auto-created):
+  #   idx_requests_ts           ON requests (timestamp DESC)
+  #   idx_requests_token        ON requests (token_key_hash)
+  #   idx_requests_team         ON requests (team)
+  #   idx_requests_token_ts     ON requests (token_key_hash, timestamp DESC)
+  #   idx_requests_team_ts      ON requests (team, timestamp DESC)
+  #   idx_requests_model_ts     ON requests (model, timestamp DESC)
+  #   idx_requests_status_ts    ON requests (status, timestamp DESC)
+  #
+  # Cleanup: old rows deleted periodically by retention_days

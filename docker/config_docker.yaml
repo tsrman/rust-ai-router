@@ -1,0 +1,40 @@
+server:
+  listen: "0.0.0.0:8080"
+
+teams:
+  - name: "default"
+    models: ["deepseek-chat"]
+    limits: { rpm: 1000, tpm: 500000 }
+
+tokens:
+  - key: "sk-your-proxy-token"
+    team: "default"
+
+models:
+  - name: "deepseek-chat"
+    aliases: ["deepseek"]
+    endpoints:
+      - url: "https://api.deepseek.com"
+        key: "sk-your-deepseek-key"  # CHANGEME
+
+fail2ban:
+  max_failures: 5
+  ban_duration_secs: 60
+  error_threshold_pct: 0.5
+  fail_status_codes: ["5xx", "401", "403", "429"]
+  health_check_interval_secs: 30
+
+session:
+  sticky_ttl_secs: 300
+
+sync:
+  enabled: true
+  redis_url: "redis://valkey:6379/0"
+  key_prefix: "oar"
+
+stats:
+  enabled: true
+  postgres_url: "postgres://oar:change-me-in-production@postgres:5432/openai_router"
+  retention_days: 30
+  cleanup_interval_secs: 3600
+  aggregation_interval_secs: 300

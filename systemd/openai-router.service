@@ -1,0 +1,34 @@
+[Unit]
+Description=OpenAI Router - High-performance API proxy
+Documentation=https://github.com/example/openai-router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=openai-router
+Group=openai-router
+WorkingDirectory=/opt/openai-router
+ExecStart=/opt/openai-router/openai-router /opt/openai-router/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Environment
+Environment=RUST_LOG=info
+Environment=OPENAI_ROUTER_CONFIG=/opt/openai-router/config.yaml
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/openai-router
+PrivateTmp=yes
+CapabilityBoundingSet=
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
