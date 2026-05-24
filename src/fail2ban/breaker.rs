@@ -132,8 +132,7 @@ impl Fail2ban {
 
     /// Все эндпоинты: (key, healthy, reason)
     pub fn all_statuses(&self) -> Vec<(String, bool)> {
-        let mut banned_count = 0i64;
-        let result: Vec<_> = self.states
+        self.states
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
@@ -141,12 +140,20 @@ impl Fail2ban {
                     let guard = entry.value().banned_until.lock();
                     guard.map(|u| Instant::now() < u).unwrap_or(false)
                 };
-                if banned { banned_count += 1; }
                 (key, !banned)
             })
-            .collect();
-        crate::metrics::prometheus::BANNED_ENDPOINTS.set(banned_count);
-        result
+            .collect()
+    }
+
+    /// Количество забаненных эндпоинтов (для Prometheus gauge)
+    pub fn banned_count(&self) -> i64 {
+        self.states
+            .iter()
+            .filter(|entry| {
+                let guard = entry.value().banned_until.lock();
+                guard.map(|u| Instant::now() < u).unwrap_or(false)
+            })
+            .count() as i64
     }
 
     /// Причина бана для эндпоинта (None = не забанен)

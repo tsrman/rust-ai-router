@@ -75,6 +75,9 @@ pub fn start_background_health_checker(
 
         loop {
             check_all_endpoints(&config, &fail2ban, &health_store, &client).await;
+            // Обновляем Prometheus gauge
+            let count = fail2ban.banned_count();
+            crate::metrics::prometheus::BANNED_ENDPOINTS.set(count);
             tokio::time::sleep(interval).await;
         }
     });
