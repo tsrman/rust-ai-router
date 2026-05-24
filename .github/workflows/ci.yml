@@ -12,7 +12,22 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ── Check + lint ─────────────────────────────────────────────────────
+  # ── Secrets scan ──────────────────────────────────────────────────────
+  secrets-scan:
+    name: secrets scan (trufflehog)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history
+      - uses: trufflesecurity/trufflehog-action@v3
+        with:
+          path: ./
+          base: ${{ github.event.before }}
+          head: ${{ github.sha }}
+        continue-on-error: false
+
+  # ── Check + lint ──────────────────────────────────────────────────────
   check:
     name: check / ${{ matrix.name }}
     runs-on: ubuntu-latest
