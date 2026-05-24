@@ -118,10 +118,12 @@ async fn main() -> anyhow::Result<()> {
             &cfg.sync.key_prefix,
         ).await {
             Ok(store) => {
+                crate::metrics::prometheus::REDIS_CONNECTED.set(1);
                 tracing::info!("Sync connected to Redis/Valkey");
                 Arc::new(store)
             }
             Err(e) => {
+                crate::metrics::prometheus::REDIS_CONNECTED.set(0);
                 tracing::error!("Sync connection failed: {e}, continuing without sync");
                 Arc::new(crate::sync::SyncStore::new())
             }

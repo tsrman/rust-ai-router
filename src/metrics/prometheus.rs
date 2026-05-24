@@ -44,6 +44,20 @@ lazy_static! {
         &["model", "type"]
     )
     .unwrap();
+
+    /// Redis connection status: 1 = connected, 0 = disconnected
+    pub static ref REDIS_CONNECTED: IntGauge = register_int_gauge!(
+        "openai_router_redis_connected",
+        "Redis connection status (1=connected, 0=disconnected)"
+    )
+    .unwrap();
+
+    /// PostgreSQL connection status: 1 = connected, 0 = disconnected
+    pub static ref POSTGRES_CONNECTED: IntGauge = register_int_gauge!(
+        "openai_router_postgres_connected",
+        "PostgreSQL connection status (1=connected, 0=disconnected)"
+    )
+    .unwrap();
 }
 
 /// Принудительно инициализировать все метрики (чтобы /metrics не был пустым)
@@ -53,4 +67,6 @@ pub fn init() {
     let _ = &*BANNED_ENDPOINTS;
     let _ = &*RATE_LIMIT_HITS;
     let _ = &*TOKENS_CONSUMED;
+    let _ = &*REDIS_CONNECTED;
+    let _ = &*POSTGRES_CONNECTED;
 }

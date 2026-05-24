@@ -45,10 +45,13 @@ pub async fn proxy_handler(
 
     // Аутентификация
     let auth = req.extensions().get::<AuthContext>().cloned();
-    let (token_key, team, _cost_multiplier, token_rpm, token_tpm) = match auth {
-        Some(ctx) => (ctx.token_key, ctx.team, ctx.cost_multiplier, ctx.rpm, ctx.tpm),
+    let (token_key, team, _cost_multiplier, token_rpm, token_tpm) = match &auth {
+        Some(ctx) => (ctx.token_key.clone(), ctx.team.clone(), ctx.cost_multiplier, ctx.rpm, ctx.tpm),
         None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
     };
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::info!(%request_id, token = %mask_key(&token_key), team = %team, "Request");
 
     // Извлекаем заголовки до перемещения req
     let forwarded_headers = {

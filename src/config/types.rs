@@ -289,16 +289,18 @@ pub struct EffectiveLimits {
 /// Настройки синхронизации между экземплярами через Redis/Valkey
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
-    /// Включить синхронизацию (требует фичу `redis-sync` при сборке)
     #[serde(default)]
     pub enabled: bool,
-    /// Redis/Valkey URL: redis://user:pass@host:port/db
     #[serde(default)]
     pub redis_url: Option<String>,
-    /// Префикс ключей в Redis (для изоляции разных инсталляций)
     #[serde(default = "default_sync_prefix")]
     pub key_prefix: String,
+    /// Если Redis недоступен: true = пропускать запросы без лимитов, false = отклонять
+    #[serde(default = "default_true")]
+    pub fail_open: bool,
 }
+
+fn default_true() -> bool { true }
 
 fn default_sync_prefix() -> String {
     "oar".into()
@@ -310,6 +312,7 @@ impl Default for SyncConfig {
             enabled: false,
             redis_url: None,
             key_prefix: "oar".into(),
+            fail_open: true,
         }
     }
 }

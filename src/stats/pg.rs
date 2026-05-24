@@ -119,6 +119,7 @@ impl StatsWriter {
                     .execute(&pool).await.ok();
 
             tracing::info!("PostgreSQL stats connected, tables created");
+            crate::metrics::prometheus::POSTGRES_CONNECTED.set(1);
             let _ = tx.send(pool);
         });
         let pool = rx.blocking_recv().unwrap();
