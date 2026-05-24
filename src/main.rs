@@ -147,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let prometheus_registry = prometheus::default_registry();
+    crate::metrics::prometheus::init();
 
     // ── Middleware ──────────────────────────────────────────────────────
     let cors = CorsLayer::new()

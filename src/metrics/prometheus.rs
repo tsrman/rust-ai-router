@@ -45,3 +45,12 @@ lazy_static! {
     )
     .unwrap();
 }
+
+/// Принудительно инициализировать все метрики (чтобы /metrics не был пустым)
+pub fn init() {
+    let _ = &*REQUEST_COUNT;
+    let _ = &*REQUEST_LATENCY;
+    let _ = &*BANNED_ENDPOINTS;
+    let _ = &*RATE_LIMIT_HITS;
+    let _ = &*TOKENS_CONSUMED;
+}

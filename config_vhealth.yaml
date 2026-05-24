@@ -1,0 +1,30 @@
+server:
+  listen: "127.0.0.1:9090"
+  timeouts:
+    client_idle_secs: 60
+
+teams:
+  - name: "default"
+    models: ["deepseek-chat"]
+
+tokens:
+  - key: "sk-test"
+    team: "default"
+
+models:
+  - name: "deepseek-chat"
+    endpoints:
+      - url: "https://api.deepseek.com"
+        key: "sk-676e84d02b8f4141a002dfd631efa0dd"
+
+fail2ban:
+  max_failures: 3
+  ban_duration_secs: 60
+  fail_status_codes: ["5xx", "401", "429"]
+  retry_on_failure: true
+
+stats:
+  enabled: false
+
+sync:
+  enabled: false
