@@ -18,6 +18,7 @@ config_deepseek.yaml
 config_standalone.yaml
 config_vhealth.yaml
 config_f2b_test.yaml
+docker/config_docker.secret.yaml
 
 # Docker volumes
 docker/pg_data/
