@@ -1,7 +1,5 @@
 server:
   listen: "127.0.0.1:9090"
-  timeouts:
-    client_idle_secs: 60
 
 teams:
   - name: "default"
@@ -16,11 +14,16 @@ models:
     endpoints:
       - url: "https://api.deepseek.com"
         key: "sk-676e84d02b8f4141a002dfd631efa0dd"
+      - url: "https://api.deepseek.com"
+        key: "sk-bad-key-12345"
+      - url: "https://dead-host.invalid:443"
+        key: "sk-fake"
 
 fail2ban:
-  max_failures: 3
-  ban_duration_secs: 60
-  fail_status_codes: ["5xx", "401", "429"]
+  max_failures: 2
+  ban_duration_secs: 30
+  fail_status_codes: ["5xx", "401", "403", "429"]
+  health_check_interval_secs: 10
   retry_on_failure: true
 
 stats:

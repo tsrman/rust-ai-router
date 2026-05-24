@@ -8,6 +8,8 @@ struct EndpointState {
     total_requests: AtomicU64,
     total_failures: AtomicU64,
     banned_until: parking_lot::Mutex<Option<Instant>>,
+    /// Код последней ошибки (HTTP status или 0 для network error)
+    last_error_code: parking_lot::Mutex<u16>,
 }
 
 /// Circuit breaker / fail2ban для эндпоинтов
@@ -79,9 +81,15 @@ impl Fail2ban {
 
     /// Записать ошибку и проверить, нужно ли банить
     pub fn record_failure(&self, endpoint_key: &str) -> bool {
+        self.record_failure_with_code(endpoint_key, 0)
+    }
+
+    /// Записать ошибку с HTTP-кодом (0 = сетевая ошибка)
+    pub fn record_failure_with_code(&self, endpoint_key: &str, status_code: u16) -> bool {
         let state = self.ensure(endpoint_key);
         state.total_requests.fetch_add(1, Ordering::Relaxed);
         state.total_failures.fetch_add(1, Ordering::Relaxed);
+        *state.last_error_code.lock() = status_code;
 
         let failures = state.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -122,8 +130,10 @@ impl Fail2ban {
         }
     }
 
+    /// Все эндпоинты: (key, healthy, reason)
     pub fn all_statuses(&self) -> Vec<(String, bool)> {
-        self.states
+        let mut banned_count = 0i64;
+        let result: Vec<_> = self.states
             .iter()
             .map(|entry| {
                 let key = entry.key().clone();
@@ -131,9 +141,30 @@ impl Fail2ban {
                     let guard = entry.value().banned_until.lock();
                     guard.map(|u| Instant::now() < u).unwrap_or(false)
                 };
+                if banned { banned_count += 1; }
                 (key, !banned)
             })
-            .collect()
+            .collect();
+        crate::metrics::prometheus::BANNED_ENDPOINTS.set(banned_count);
+        result
+    }
+
+    /// Причина бана для эндпоинта (None = не забанен)
+    pub fn ban_reason(&self, endpoint_key: &str) -> Option<String> {
+        let state = self.states.get(endpoint_key)?;
+        let banned = {
+            let guard = state.banned_until.lock();
+            guard.map(|u| Instant::now() < u).unwrap_or(false)
+        };
+        if !banned {
+            return None;
+        }
+        let code = *state.last_error_code.lock();
+        Some(if code == 0 {
+            "network error".into()
+        } else {
+            format!("HTTP {code}")
+        })
     }
 
     fn ensure(&self, key: &str) -> dashmap::mapref::one::RefMut<'_, String, EndpointState> {
@@ -142,6 +173,7 @@ impl Fail2ban {
             total_requests: AtomicU64::new(0),
             total_failures: AtomicU64::new(0),
             banned_until: parking_lot::Mutex::new(None),
+            last_error_code: parking_lot::Mutex::new(0),
         })
     }
 }
@@ -197,15 +229,14 @@ mod tests {
         let fb = Fail2ban::new(3, 60, 0.5, &vec!["5xx".to_string()]);
         fb.record_failure("ep1");
         fb.record_failure("ep1");
-        fb.record_success("ep1"); // should reset consecutive counter
-        // Still not banned (only 2 failures, and success resets consecutive)
+        fb.record_success("ep1");
         let banned = fb.record_failure("ep1");
         assert!(!banned);
     }
 
     #[test]
     fn test_ban_expires() {
-        let fb = Fail2ban::new(1, 1, 0.5, &vec!["5xx".to_string()]); // 1 second ban
+        let fb = Fail2ban::new(1, 1, 0.5, &vec!["5xx".to_string()]);
         fb.record_failure("ep1");
         assert!(fb.is_banned("ep1"));
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -215,13 +246,34 @@ mod tests {
     #[test]
     fn test_status_code_matching() {
         let fb = Fail2ban::new(1, 60, 0.5, &vec!["5xx".to_string(), "401".to_string(), "429".to_string()]);
-
         assert!(fb.is_fail_status(500));
         assert!(fb.is_fail_status(503));
         assert!(fb.is_fail_status(401));
         assert!(fb.is_fail_status(429));
-        // Non-matching
         assert!(!fb.is_fail_status(200));
-        assert!(!fb.is_fail_status(404)); // 4xx but not 401/429
+        assert!(!fb.is_fail_status(404));
+    }
+
+    #[test]
+    fn test_ban_reason_network_error() {
+        let fb = Fail2ban::new(1, 60, 0.5, &vec!["5xx".to_string()]);
+        fb.record_failure_with_code("ep1", 0);
+        let reason = fb.ban_reason("ep1").unwrap();
+        assert_eq!(reason, "network error");
+    }
+
+    #[test]
+    fn test_ban_reason_http_status() {
+        let fb = Fail2ban::new(1, 60, 0.5, &vec!["5xx".to_string(), "401".to_string()]);
+        fb.record_failure_with_code("ep1", 401);
+        let reason = fb.ban_reason("ep1").unwrap();
+        assert_eq!(reason, "HTTP 401");
+    }
+
+    #[test]
+    fn test_ban_reason_none_when_not_banned() {
+        let fb = Fail2ban::new(3, 60, 0.5, &vec!["5xx".to_string()]);
+        fb.record_failure("ep1");
+        assert!(fb.ban_reason("ep1").is_none());
     }
 }

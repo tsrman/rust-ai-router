@@ -285,7 +285,7 @@ pub async fn proxy_handler(
                 let should_retry = retry_on_failure && is_fail;
 
                 if is_fail {
-                    let just_banned = state.fail2ban.record_failure(&ep_key);
+                    let just_banned = state.fail2ban.record_failure_with_code(&ep_key, upstream_status);
                     tracing::warn!(status = upstream_status, endpoint = %ep_key, banned = just_banned, "Upstream error");
                     if just_banned {
                         let sync = state.sync.clone();

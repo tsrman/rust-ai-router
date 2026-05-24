@@ -67,6 +67,8 @@ pub async fn health_dashboard(
                 .map(|(_, ok)| *ok)
                 .unwrap_or(true);
 
+            let reason = state.fail2ban.ban_reason(&ep_key).unwrap_or_default();
+
             let color = if healthy { "#4caf50" } else { "#f44336" };
             let status_text = if healthy { "UP" } else { "BANNED" };
 
@@ -78,12 +80,14 @@ pub async fn health_dashboard(
                     <td style='color:{}; font-weight:bold'>{}</td>
                     <td>{}</td>
                     <td>{}</td>
+                    <td>{}</td>
                 </tr>",
                 model.name,
                 i,
                 ep.url,
                 color,
                 status_text,
+                reason,
                 ep.limits.as_ref().map(|l| l.rpm).unwrap_or(0),
                 ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0),
             ));
@@ -120,7 +124,7 @@ pub async fn health_dashboard(
         <div class="card"><div>Teams</div><div class="value">{}</div></div>
     </div>
     <table>
-        <tr><th>Model</th><th>EP #</th><th>URL</th><th>Status</th><th>RPM</th><th>TPM</th></tr>
+        <tr><th>Model</th><th>EP #</th><th>URL</th><th>Status</th><th>Reason</th><th>RPM</th><th>TPM</th></tr>
         {}
     </table>
     <p style="margin-top:20px; color:#666">Auto-refresh: 10s | <a href="/health" style="color:#7c4dff">JSON API</a> | <a href="/metrics" style="color:#7c4dff">Prometheus</a></p>
