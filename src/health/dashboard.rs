@@ -19,8 +19,8 @@ pub async fn health_json(
         .flat_map(|model| {
             model.endpoints.iter().enumerate().map(|(i, ep)| {
                 let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-                let banned = state.fail2ban.is_banned(&ep_key);
-                let health = state.health_store.get(&ep_key);
+                let banned = state.limits.fail2ban.is_banned(&ep_key);
+                let health = state.monitoring.health_store.get(&ep_key);
                 let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
                 let last_error = health.as_ref().map(|h| h.last_error.clone()).unwrap_or_default();
 
@@ -57,11 +57,11 @@ pub async fn health_dashboard(
     for model in &cfg.models {
         for (i, ep) in model.endpoints.iter().enumerate() {
             let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-            let banned = state.fail2ban.is_banned(&ep_key);
-            let health = state.health_store.get(&ep_key);
+            let banned = state.limits.fail2ban.is_banned(&ep_key);
+            let health = state.monitoring.health_store.get(&ep_key);
             let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
             let reason = if banned {
-                state.fail2ban.ban_reason(&ep_key).unwrap_or_default()
+                state.limits.fail2ban.ban_reason(&ep_key).unwrap_or_default()
             } else if !healthy {
                 health.as_ref().map(|h| h.last_error.clone()).unwrap_or_default()
             } else {

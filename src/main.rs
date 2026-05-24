@@ -144,13 +144,19 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         client,
         router: mdl_router,
-        rate_limiters,
-        fail2ban: fail2ban.clone(),
-        sticky,
-        stats: stats_writer,
-        sync: sync_store,
-        health_store,
-        sticky_ttl_secs: cfg.session.sticky_ttl_secs,
+        limits: proxy::handler::RateLimitState {
+            limiters: rate_limiters,
+            fail2ban: fail2ban.clone(),
+            sync: sync_store,
+        },
+        session: proxy::handler::SessionState {
+            sticky,
+            sticky_ttl_secs: cfg.session.sticky_ttl_secs,
+        },
+        monitoring: proxy::handler::MonitoringState {
+            stats: stats_writer,
+            health_store,
+        },
     });
 
     let prometheus_registry = prometheus::default_registry();

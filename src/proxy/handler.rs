@@ -22,18 +22,33 @@ use crate::ratelimit::{self, RateLimiterStore};
 use crate::router::{ModelRouter, SelectedEndpoint, SessionStickyStore};
 use crate::stats::StatsWriter;
 
+/// Состояние rate-limiting (локальный governor + sync Redis)
+pub struct RateLimitState {
+    pub limiters: RateLimiterStore,
+    pub fail2ban: Arc<Fail2ban>,
+    pub sync: Arc<crate::sync::SyncStore>,
+}
+
+/// Состояние sticky-сессий
+pub struct SessionState {
+    pub sticky: SessionStickyStore,
+    pub sticky_ttl_secs: u64,
+}
+
+/// Состояние мониторинга (статистика + health check)
+pub struct MonitoringState {
+    pub stats: Arc<StatsWriter>,
+    pub health_store: Arc<HealthStore>,
+}
+
 /// Общее состояние приложения
 pub struct AppState {
     pub config: Arc<ArcSwap<AppConfig>>,
     pub client: Client,
     pub router: ModelRouter,
-    pub rate_limiters: RateLimiterStore,
-    pub fail2ban: Arc<Fail2ban>,
-    pub sticky: SessionStickyStore,
-    pub stats: Arc<StatsWriter>,
-    pub sync: Arc<crate::sync::SyncStore>,
-    pub health_store: Arc<HealthStore>,
-    pub sticky_ttl_secs: u64,
+    pub limits: RateLimitState,
+    pub session: SessionState,
+    pub monitoring: MonitoringState,
 }
 
 /// Основной обработчик проксирования /v1/chat/completions etc.
@@ -123,7 +138,7 @@ pub async fn proxy_handler(
     if let Some(ref m) = model_cfg {
         for ep in &m.endpoints {
             let k = format!("{}:{}", ep.url, mask_key(&ep.key));
-            if state.fail2ban.is_banned(&k) || state.sync.is_banned(&k).await {
+            if state.limits.fail2ban.is_banned(&k) || state.limits.sync.is_banned(&k).await {
                 banned_keys.insert(k);
             }
         }
@@ -146,9 +161,9 @@ pub async fn proxy_handler(
     let session_id = get_session_id(&body_bytes);
     let endpoint = if let Some(sid) = &session_id {
         // Пробуем локальный sticky, затем sync (Redis)
-        let mut sticky_idx = state.sticky.get(sid);
+        let mut sticky_idx = state.session.sticky.get(sid);
         if sticky_idx.is_none() {
-            sticky_idx = state.sync.get_sticky(sid).await;
+            sticky_idx = state.limits.sync.get_sticky(sid).await;
         }
         if let Some(sticky_idx) = sticky_idx {
             if let Some(m) = &model_cfg {
@@ -156,7 +171,7 @@ pub async fn proxy_handler(
                     let ep = &m.endpoints[sticky_idx];
                     let sticky_key = format!("{}:{}", ep.url, mask_key(&ep.key));
                     if !banned_keys.contains(&sticky_key) {
-                        state.sticky.touch(sid);
+                        state.session.sticky.touch(sid);
                         Some(build_selected_endpoint(ep, sticky_idx, m.endpoints.len()))
                     } else {
                         // Sticky endpoint забанен — очищаем привязку
@@ -219,7 +234,7 @@ pub async fn proxy_handler(
 
             // Sync (Redis) rate limit — shared across instances
             if current_endpoint.endpoint_limits_rpm > 0 {
-                let sync_rl = state.sync.check_rate_limit("ep", &ep_key, current_endpoint.endpoint_limits_rpm as u64).await;
+                let sync_rl = state.limits.sync.check_rate_limit("ep", &ep_key, current_endpoint.endpoint_limits_rpm as u64).await;
                 if !sync_rl.allowed {
                     let key_copy = ep_key.clone();
                     prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &key_copy]).inc();
@@ -236,7 +251,7 @@ pub async fn proxy_handler(
                 }
             }
 
-            let ep_rl = state.rate_limiters.check(
+            let ep_rl = state.limits.limiters.check(
                 &ep_rl_key,
                 current_endpoint.endpoint_limits_rpm,
                 current_endpoint.endpoint_limits_tpm,
@@ -277,14 +292,14 @@ pub async fn proxy_handler(
         match result {
             Ok(upstream_resp) => {
                 let upstream_status = upstream_resp.status().as_u16();
-                let is_fail = state.fail2ban.is_fail_status(upstream_status);
+                let is_fail = state.limits.fail2ban.is_fail_status(upstream_status);
                 let should_retry = retry_on_failure && is_fail;
 
                 if is_fail {
-                    let just_banned = state.fail2ban.record_failure_with_code(&ep_key, upstream_status);
+                    let just_banned = state.limits.fail2ban.record_failure_with_code(&ep_key, upstream_status);
                     tracing::warn!(status = upstream_status, endpoint = %ep_key, banned = just_banned, "Upstream error");
                     if just_banned {
-                        let sync = state.sync.clone();
+                        let sync = state.limits.sync.clone();
                         let ep = ep_key.clone();
                         tokio::spawn(async move {
                             sync.set_ban(&ep, 60).await;
@@ -292,18 +307,18 @@ pub async fn proxy_handler(
                         });
                     }
                 } else {
-                    state.fail2ban.record_success(&ep_key);
+                    state.limits.fail2ban.record_success(&ep_key);
                 }
 
                 if upstream_status < 400 || !should_retry {
                     // Успех или не-retryable ошибка → возвращаем клиенту
                     if let Some(sid) = &session_id {
-                        state.sticky.set(sid, current_endpoint.index);
+                        state.session.sticky.set(sid, current_endpoint.index);
                         // Синхронизируем sticky в Redis (fire-and-forget)
-                        let sync = state.sync.clone();
+                        let sync = state.limits.sync.clone();
                         let sid_clone = sid.clone();
                         let idx = current_endpoint.index;
-                        let ttl = state.sticky_ttl_secs;
+                        let ttl = state.session.sticky_ttl_secs;
                         tokio::spawn(async move {
                             sync.set_sticky(&sid_clone, idx, ttl).await;
                         });
@@ -376,7 +391,7 @@ pub async fn proxy_handler(
                     }
 
                     // Fire-and-forget: запись статистики в БД
-                    let stats = state.stats.clone();
+                    let stats = state.monitoring.stats.clone();
                     let model = canonical_model.clone();
                     let ep_url = current_endpoint.url.clone();
                     let team_name = team.clone();
@@ -404,10 +419,10 @@ pub async fn proxy_handler(
             }
             Err(e) => {
                 let key_copy = ep_key.clone();
-                let just_banned = state.fail2ban.record_failure(&key_copy);
+                let just_banned = state.limits.fail2ban.record_failure(&key_copy);
                 tracing::error!(endpoint = %key_copy, error = %e, banned = just_banned, "Upstream network error");
                 if just_banned {
-                    let sync = state.sync.clone();
+                    let sync = state.limits.sync.clone();
                     let ep = key_copy.clone();
                     tokio::spawn(async move {
                         sync.set_ban(&ep, 60).await;
@@ -854,7 +869,7 @@ pub async fn proxy_generic(
             let status = resp.status().as_u16();
 
             // Fire-and-forget stats (minimal — no token counting)
-            let stats = state.stats.clone();
+            let stats = state.monitoring.stats.clone();
             let model = canonical_model.clone();
             let ep_url = current_endpoint.url.clone();
             let team_name = auth.team.clone();
@@ -870,19 +885,19 @@ pub async fn proxy_generic(
             insert_header(headers, "x-latency-ms", &latency_ms.to_string());
 
             // Record success/fail for fail2ban
-            if status >= 400 && state.fail2ban.is_fail_status(status) {
+            if status >= 400 && state.limits.fail2ban.is_fail_status(status) {
                 let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
-                state.fail2ban.record_failure_with_code(&ep_key, status);
+                state.limits.fail2ban.record_failure_with_code(&ep_key, status);
             } else {
                 let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
-                state.fail2ban.record_success(&ep_key);
+                state.limits.fail2ban.record_success(&ep_key);
             }
 
             resp
         }
         Err(e) => {
             let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
-            state.fail2ban.record_failure(&ep_key);
+            state.limits.fail2ban.record_failure(&ep_key);
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
     }
@@ -959,7 +974,7 @@ pub async fn check_all_rate_limits(
 
     if team_rpm > 0 {
         let team_key = format!("team:{team}");
-        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
+        let sync_rl = state.limits.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
         if !sync_rl.allowed {
             prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
             return Some(rate_limit_response(&sync_rl, &format!("Team '{team}' (shared)")));
@@ -967,7 +982,7 @@ pub async fn check_all_rate_limits(
     }
     if team_rpm > 0 || team_tpm > 0 {
         let team_key = format!("team:{team}");
-        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, ratelimit::RateLimitScope::Token);
+        let team_rl = state.limits.limiters.check(&team_key, team_rpm, team_tpm, 1, ratelimit::RateLimitScope::Token);
         if !team_rl.allowed {
             prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
             return Some(rate_limit_response(&team_rl, &format!("Team '{team}'")));
@@ -976,13 +991,13 @@ pub async fn check_all_rate_limits(
 
     // Token (personal)
     if token_rpm > 0 {
-        let sync_rl = state.sync.check_rate_limit("token", token_key, token_rpm as u64).await;
+        let sync_rl = state.limits.sync.check_rate_limit("token", token_key, token_rpm as u64).await;
         if !sync_rl.allowed {
             prometheus::RATE_LIMIT_HITS.with_label_values(&["token", token_key]).inc();
             return Some(rate_limit_response(&sync_rl, "Token (shared)"));
         }
     }
-    let token_rl = state.rate_limiters.check(token_key, token_rpm, token_tpm, 1, ratelimit::RateLimitScope::Token);
+    let token_rl = state.limits.limiters.check(token_key, token_rpm, token_tpm, 1, ratelimit::RateLimitScope::Token);
     if !token_rl.allowed {
         prometheus::RATE_LIMIT_HITS.with_label_values(&["token", token_key]).inc();
         return Some(rate_limit_response(&token_rl, "Token"));
