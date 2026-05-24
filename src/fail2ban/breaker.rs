@@ -130,21 +130,6 @@ impl Fail2ban {
         }
     }
 
-    /// Все эндпоинты: (key, healthy, reason)
-    pub fn all_statuses(&self) -> Vec<(String, bool)> {
-        self.states
-            .iter()
-            .map(|entry| {
-                let key = entry.key().clone();
-                let banned = {
-                    let guard = entry.value().banned_until.lock();
-                    guard.map(|u| Instant::now() < u).unwrap_or(false)
-                };
-                (key, !banned)
-            })
-            .collect()
-    }
-
     /// Количество забаненных эндпоинтов (для Prometheus gauge)
     pub fn banned_count(&self) -> i64 {
         self.states

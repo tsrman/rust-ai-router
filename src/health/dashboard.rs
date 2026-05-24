@@ -5,7 +5,6 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 
-use crate::health::checker::HealthStore;
 use crate::proxy::handler::AppState;
 
 /// GET /health — JSON статус

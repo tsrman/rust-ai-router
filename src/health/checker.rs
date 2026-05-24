@@ -9,7 +9,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
@@ -18,7 +18,6 @@ use crate::fail2ban::Fail2ban;
 #[derive(Debug, Clone)]
 pub struct EndpointHealth {
     pub healthy: bool,
-    pub last_check: Instant,
     pub last_error: String,
 }
 
@@ -40,7 +39,6 @@ impl HealthStore {
     pub fn set_healthy(&self, key: &str) {
         self.states.insert(key.to_string(), EndpointHealth {
             healthy: true,
-            last_check: Instant::now(),
             last_error: String::new(),
         });
     }
@@ -48,7 +46,6 @@ impl HealthStore {
     pub fn set_unhealthy(&self, key: &str, error: &str) {
         self.states.insert(key.to_string(), EndpointHealth {
             healthy: false,
-            last_check: Instant::now(),
             last_error: error.to_string(),
         });
     }
