@@ -19,13 +19,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # full history
-      - uses: trufflesecurity/trufflehog-action@v3
+          fetch-depth: 0
+      - name: Run trufflehog
+        uses: trufflesecurity/trufflehog@main
         with:
           path: ./
           base: ${{ github.event.before }}
           head: ${{ github.sha }}
-        continue-on-error: false
+          extra_args: --only-verified
 
   # ── Check + lint ──────────────────────────────────────────────────────
   check:
