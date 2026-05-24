@@ -339,15 +339,20 @@ pub async fn proxy_handler(
                         1024 * 1024,
                     ).await.unwrap_or_default();
 
-                    // Извлекаем usage из ответа
+                    // Извлекаем usage из ответа (поддержка Chat Completions + Responses API)
                     let (tokens_prompt, tokens_completion) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes)
                         .ok()
                         .and_then(|v| {
                             let usage = v.get("usage")?;
-                            Some((
-                                usage.get("prompt_tokens")?.as_u64().unwrap_or(0),
-                                usage.get("completion_tokens")?.as_u64().unwrap_or(0),
-                            ))
+                            let prompt = usage.get("prompt_tokens")
+                                .or_else(|| usage.get("input_tokens"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let completion = usage.get("completion_tokens")
+                                .or_else(|| usage.get("output_tokens"))
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            Some((prompt, completion))
                         })
                         .unwrap_or((0, 0));
 

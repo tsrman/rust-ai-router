@@ -222,6 +222,7 @@ async fn main() -> anyhow::Result<()> {
             }),
         )
         .route("/v1/chat/completions", post(proxy::handler::proxy_handler))
+        .route("/v1/responses", post(proxy::handler::proxy_handler))
         .route("/v1/completions", post(proxy::handler::proxy_handler))
         .route("/v1/messages", post(proxy::handler::proxy_handler))
         .route("/v1/models", get(list_models))
