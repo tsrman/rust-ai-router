@@ -244,6 +244,25 @@ models:
   #       key: "sk-secondary-key"
   #       weight: 1                         # Gets ~33% of traffic
 
+  # =========================================================================
+  # Audio model (whisper) — multipart/form-data
+  # =========================================================================
+  # - name: "whisper-1"
+  #   model_type: audio
+  #   aliases: ["openai/whisper-large-v3-turbo"]
+  #   endpoints:
+  #     - url: "https://api.openai.com"
+  #       key: "sk-your-openai-key"
+
+  # =========================================================================
+  # Embedding model
+  # =========================================================================
+  # - name: "text-embedding-3-small"
+  #   model_type: embedding
+  #   endpoints:
+  #     - url: "https://api.openai.com"
+  #       key: "sk-your-openai-key"
+
 # ===========================================================================
 # FAIL2BAN — automatic endpoint banning on errors
 # ===========================================================================

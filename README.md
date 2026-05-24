@@ -205,7 +205,8 @@ Define each model with one or more upstream endpoints. The router load-balances 
 ```yaml
 models:
   - name: "gpt-4o"                   # Canonical model name
-    aliases: ["gpt-4", "gpt-4-turbo", "gpt-4-vision"]  # Alternative names
+    model_type: chat                 # chat (default) | audio | embedding | completions | rerank
+    aliases: ["gpt-4", "gpt-4-turbo", "gpt-4-vision"]
     endpoints:
       - url: "https://api.openai.com"     # Upstream base URL
         key: "sk-openai-key-1"            # Upstream API key
@@ -233,6 +234,28 @@ models:
 **Cost fields** are in USD per 1 million tokens. These are exposed in response headers (`x-cost-prompt-per-1m`, `x-cost-completion-per-1m`) for downstream billing.
 
 **Weight** controls load distribution. Endpoint with weight 2 gets roughly 2x traffic compared to weight 1. Default weight is 1.
+
+**model_type** maps endpoints to API routes:
+
+| model_type | Routes |
+|-----------|--------|
+| `chat` (default) | `/v1/chat/completions`, `/v1/messages`, `/v1/models` |
+| `audio` | `/v1/audio/transcriptions`, `/v1/audio/translations` |
+| `embedding` | `/v1/embeddings` |
+| `completions` | `/v1/completions` |
+| `rerank` | `/v1/rerank` |
+
+All other `/v1/{*path}` endpoints are handled by the generic proxy — auth + rate-limit + round-robin + forward as-is.
+
+```yaml
+# Audio model example — multipart/form-data, model from form field
+  - name: "whisper-1"
+    model_type: audio
+    aliases: ["openai/whisper-large-v3-turbo"]
+    endpoints:
+      - url: "https://api.openai.com"
+        key: "sk-openai-key-2"
+```
 
 ### Fail2ban
 
