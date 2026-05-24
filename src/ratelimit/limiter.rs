@@ -71,12 +71,9 @@ impl RateLimiterStore {
         // TPM проверка
         if tpm > 0 && estimated_tokens > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
-            // Для TPM проверяем по одному токену; при первом же отказе — возвращаем ошибку
-            for _i in 0..estimated_tokens {
+            for _ in 0..estimated_tokens.min(1000) {  // cap at 1000 to avoid excessive looping
                 match pair.tpm.check_key(&key.to_string()) {
                     Err(not_until) => {
-                        // «Возвращаем» уже потреблённые токены обратно (упрощение)
-                        // В реальности нужно было бы сделать atomic check, но для MVP норм
                         let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());
                         return RateLimitResult {
                             allowed: false,

@@ -349,17 +349,31 @@ pub async fn proxy_handler(
                         format!("{:x}", h.finish())
                     };
 
-                    // Возвращаем тело в resp (было извлечено для чтения usage)
+                    // Используем уже прочитанные байты (без клонирования)
+
+                    // Anthropic: перевести ответ OpenAI → Anthropic (до построения ответа)
+                    if is_anthropic {
+                        if let Ok(openai_json) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes) {
+                            let anthropic_json = crate::proxy::anthropic::translate_response(&openai_json);
+                            let new_body = serde_json::to_vec(&anthropic_json).unwrap_or_default();
+                            return axum::response::Response::builder()
+                                .status(upstream_status)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(new_body))
+                                .unwrap_or(resp);
+                        }
+                    }
+
+                    // Строим ответ с заголовками
                     resp = axum::response::Response::builder()
                         .status(upstream_status)
-                        .body(axum::body::Body::from(resp_body_bytes.clone()))
+                        .body(axum::body::Body::from(resp_body_bytes))
                         .unwrap_or(resp);
 
                     let headers = resp.headers_mut();
                     insert_header(headers, "x-endpoint-used", &current_endpoint.url);
                     insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
                     insert_header(headers, "x-latency-ms", &latency.as_millis().to_string());
-                    // Идентификатор инстанса (для отладки multi-instance)
                     insert_header(headers, "x-instance", &std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()));
                     if current_endpoint.cost_prompt > 0.0 || current_endpoint.cost_completion > 0.0 {
                         insert_header(headers, "x-cost-prompt-per-1m", &current_endpoint.cost_prompt.to_string());
@@ -378,19 +392,6 @@ pub async fn proxy_handler(
                     tokio::spawn(async move {
                         stats.record_request(&model, &ep_url, &team_name, tokens_prompt, tokens_completion, latency, upstream_status as u16, Some(&th), cp, cc).await;
                     });
-
-                    // Anthropic: перевести ответ OpenAI → Anthropic
-                    if is_anthropic {
-                        if let Ok(openai_json) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes) {
-                            let anthropic_json = crate::proxy::anthropic::translate_response(&openai_json);
-                            let new_body = serde_json::to_vec(&anthropic_json).unwrap_or_default();
-                            return axum::response::Response::builder()
-                                .status(upstream_status)
-                                .header("content-type", "application/json")
-                                .body(axum::body::Body::from(new_body))
-                                .unwrap_or(resp);
-                        }
-                    }
 
                     return resp;
                 }

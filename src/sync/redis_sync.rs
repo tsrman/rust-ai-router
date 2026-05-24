@@ -33,7 +33,7 @@ impl SyncStore {
             .await
             .map_err(|e| format!("Redis PING failed: {e}"))?;
 
-        tracing::info!(url = %mask_url(url), prefix, "Redis sync connected");
+        tracing::info!(url = %crate::utils::mask_url(url), prefix, "Redis sync connected");
         Ok(Self { conn: Some(conn), prefix: prefix.to_string() })
     }
 
@@ -106,9 +106,4 @@ impl SyncStore {
     }
 
     pub async fn publish_ban(&self, _endpoint_key: &str, _duration_secs: u64) {}
-}
-
-fn mask_url(url: &str) -> String {
-    if let Some(at) = url.find('@') { format!("redis://***@{}", &url[at + 1..]) }
-    else { url.to_string() }
 }

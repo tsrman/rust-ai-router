@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
-
+use crate::utils::mask_key;
 /// Состояние одного эндпоинта
 #[derive(Debug, Clone)]
 pub struct EndpointHealth {
@@ -137,11 +137,4 @@ async fn check_all_endpoints(
             }
         }
     }
-}
-
-fn mask_key(key: &str) -> String {
-    if key.len() <= 8 {
-        return "***".into();
-    }
-    format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }

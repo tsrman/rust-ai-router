@@ -8,6 +8,7 @@ mod ratelimit;
 mod router;
 mod stats;
 mod sync;
+mod utils;
 
 use axum::{
     middleware,
@@ -183,6 +184,19 @@ async fn main() -> anyhow::Result<()> {
             },
         );
 
+    // ── Health routes (root, без auth) ──────────────────────────────────
+    let health_routes = Router::new()
+        .route("/health", get(health::dashboard::health_json))
+        .route("/vhealth", get(health::dashboard::health_dashboard))
+        .route("/metrics", get(|| async move {
+            let encoder = TextEncoder::new();
+            let metric_families = prometheus::default_registry().gather();
+            let mut buffer = vec![];
+            encoder.encode(&metric_families, &mut buffer).unwrap();
+            ([("content-type", "text/plain; version=0.0.4")], buffer)
+        }))
+        .with_state(state.clone());
+
     // ── Роутер ─────────────────────────────────────────────────────────
     let mut api_routes = Router::new()
         .route("/health", get(health::dashboard::health_json))
@@ -227,7 +241,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let bp = base_path.trim_start_matches('/');
         tracing::info!(addr = %listen_addr, base_path = %bp, "Listening (root + nested)");
-        api_routes.clone().nest(&format!("/{bp}"), api_routes)
+        health_routes.merge(api_routes.clone().nest(&format!("/{bp}"), api_routes))
     };
 
     tracing::info!("Server ready, accepting connections");
