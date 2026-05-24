@@ -787,3 +787,151 @@ mod tests {
         assert!(headers.get("x-ratelimit-reset-requests").unwrap().to_str().unwrap().starts_with("30."));
     }
 }
+
+/// Generic proxy for all vLLM / OpenAI-compatible endpoints
+/// (/v1/completions, /v1/embeddings, /v1/rerank, /v1/tokenize, etc.)
+pub async fn proxy_generic(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    req: Request<Body>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let auth = match req.extensions().get::<AuthContext>() {
+        Some(ctx) => ctx.clone(),
+        None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
+    };
+
+    let cfg = state.config.load();
+
+    // Team rate-limit
+    let team_limits = cfg.teams.iter().find(|t| t.name == auth.team)
+        .and_then(|t| t.limits.as_ref());
+    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
+    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
+
+    if team_rpm > 0 {
+        let team_key = format!("team:{}", auth.team);
+        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
+        if !sync_rl.allowed {
+            return rate_limit_response(&sync_rl, &format!("Team '{}' (shared)", auth.team));
+        }
+    }
+    if team_rpm > 0 || team_tpm > 0 {
+        let team_key = format!("team:{}", auth.team);
+        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, ratelimit::RateLimitScope::Token);
+        if !team_rl.allowed {
+            return rate_limit_response(&team_rl, &format!("Team '{}'", auth.team));
+        }
+    }
+
+    // Token rate-limit
+    if auth.rpm > 0 {
+        let sync_rl = state.sync.check_rate_limit("token", &auth.token_key, auth.rpm as u64).await;
+        if !sync_rl.allowed {
+            return rate_limit_response(&sync_rl, "Token (shared)");
+        }
+    }
+    let token_rl = state.rate_limiters.check(&auth.token_key, auth.rpm, auth.tpm, 1, ratelimit::RateLimitScope::Token);
+    if !token_rl.allowed {
+        return rate_limit_response(&token_rl, "Token");
+    }
+
+    // Read body (extract path first — req moves into read_body_and_parse)
+    let req_path = req.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+    let (body_bytes, body_json) = match read_body_and_parse(req).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Extract model from body
+    let model_name = body_json
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let canonical_model = cfg.canonical_model_name(model_name);
+
+    // Check model access
+    if !cfg.token_has_model_access(&auth.token_key, &canonical_model) {
+        return (StatusCode::FORBIDDEN, format!("Model '{}' not allowed for this token", canonical_model)).into_response();
+    }
+
+    // Select endpoint
+    let Some(current_endpoint) = state.router.select_endpoint(&canonical_model) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, format!("No endpoint for model: {}", canonical_model)).into_response();
+    };
+
+    // Build URL: proxy path relative to endpoint base URL
+    let upstream_url = format!("{}{}", current_endpoint.url.trim_end_matches('/'), req_path);
+
+    // Proxy raw (don't parse response — just forward)
+    let start = std::time::Instant::now();
+    match proxy_raw(
+        &state.client,
+        &upstream_url,
+        &current_endpoint.api_key,
+        &body_bytes,
+    ).await {
+        Ok(resp) => {
+            let latency = start.elapsed();
+            let status = resp.status().as_u16();
+
+            // Fire-and-forget stats (minimal — no token counting)
+            let stats = state.stats.clone();
+            let model = canonical_model.clone();
+            let ep_url = current_endpoint.url.clone();
+            let team_name = auth.team.clone();
+            let latency_ms = latency.as_millis() as u64;
+            tokio::spawn(async move {
+                stats.record_request(&model, &ep_url, &team_name, 0, 0, latency_ms, status, None, 0.0, 0.0).await;
+            });
+
+            let mut resp = resp;
+            let headers = resp.headers_mut();
+            insert_header(headers, "x-endpoint-used", &current_endpoint.url);
+            insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
+            insert_header(headers, "x-latency-ms", &latency_ms.to_string());
+
+            // Record success/fail for fail2ban
+            if status >= 400 && state.fail2ban.is_fail_status(status) {
+                let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+                state.fail2ban.record_failure_with_code(&ep_key, status);
+            } else {
+                let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+                state.fail2ban.record_success(&ep_key);
+            }
+
+            resp
+        }
+        Err(e) => {
+            let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+            state.fail2ban.record_failure(&ep_key);
+            (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
+        }
+    }
+}
+
+/// Proxy raw bytes to upstream (no JSON parsing, no OpenAI-specific logic)
+async fn proxy_raw(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    body: &[u8],
+) -> Result<Response<Body>, anyhow::Error> {
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await?;
+
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body_bytes = resp.bytes().await?;
+
+    Ok(Response::builder()
+        .status(status)
+        .body(Body::from(body_bytes))?)
+}
