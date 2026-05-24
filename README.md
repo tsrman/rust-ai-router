@@ -123,6 +123,7 @@ server:
   listen: "0.0.0.0:8080"     # Bind address (default: 0.0.0.0:8080)
   base_path: ""              # Sub-URL prefix, e.g. "/rustrouter"
   # base_path: "/rustrouter" # → /rustrouter/v1/models, /rustrouter/health, ...
+  max_body_size: 10485760    # Max request body in bytes (default 10MB)
   timeouts:
     client_idle_secs: 60         # Keep-alive idle timeout, 0 = no limit
     client_read_secs: 30         # Full request cycle timeout, 0 = no limit

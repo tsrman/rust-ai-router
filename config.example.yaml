@@ -19,6 +19,7 @@ server:
   # listen: "[::]:8080"       # IPv6 all interfaces
   base_path: ""               # Sub-URL prefix, e.g. "/rustrouter" or "/api/v2"
   # base_path: "/rustrouter"  # → /rustrouter/v1/models, /rustrouter/health, ...
+  max_body_size: 10485760      # Max request body in bytes (default 10MB)
   # ── Таймауты (все значения в секундах, 0 = безлимит) ──
   timeouts:
     client_idle_secs: 60          # Keep-alive / idle timeout для клиентов
