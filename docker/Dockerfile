@@ -7,7 +7,11 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 
-RUN cargo build --release
+# --mount=type=cache сохраняет cargo registry между сборками (быстро после первого раза)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/app/target \
+    cargo build --release && \
+    cp target/release/openai-router /app/openai-router
 
 # ── Runtime stage ──────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -15,7 +19,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY --from=builder /app/target/release/openai-router /app/openai-router
+COPY --from=builder /app/openai-router /app/openai-router
 COPY docker/config_docker.yaml /app/config.example.yaml
 
 EXPOSE 8080
