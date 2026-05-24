@@ -5,6 +5,7 @@ use axum::{
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::health::checker::HealthStore;
 use crate::proxy::handler::AppState;
 
 /// GET /health — JSON статус
@@ -12,7 +13,6 @@ pub async fn health_json(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
     let cfg = state.config.load();
-    let statuses = state.fail2ban.all_statuses();
 
     let endpoints: Vec<serde_json::Value> = cfg
         .models
@@ -20,17 +20,18 @@ pub async fn health_json(
         .flat_map(|model| {
             model.endpoints.iter().enumerate().map(|(i, ep)| {
                 let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-                let healthy = statuses
-                    .iter()
-                    .find(|(k, _)| k == &ep_key)
-                    .map(|(_, ok)| *ok)
-                    .unwrap_or(true);
+                let banned = state.fail2ban.is_banned(&ep_key);
+                let health = state.health_store.get(&ep_key);
+                let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+                let last_error = health.as_ref().map(|h| h.last_error.clone()).unwrap_or_default();
 
                 json!({
                     "model": model.name,
                     "endpoint_index": i,
                     "url": ep.url,
                     "healthy": healthy,
+                    "banned": banned,
+                    "last_error": last_error,
                     "rpm_limit": ep.limits.as_ref().map(|l| l.rpm).unwrap_or(0),
                     "tpm_limit": ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0),
                 })
@@ -38,15 +39,12 @@ pub async fn health_json(
         })
         .collect();
 
-    let active_tokens = cfg.tokens.len();
-    let active_teams = cfg.teams.len();
-
     Json(json!({
         "status": "ok",
         "models": cfg.models.len(),
         "endpoints": endpoints,
-        "active_tokens": active_tokens,
-        "active_teams": active_teams,
+        "active_tokens": cfg.tokens.len(),
+        "active_teams": cfg.teams.len(),
     }))
 }
 
@@ -55,22 +53,29 @@ pub async fn health_dashboard(
     State(state): State<Arc<AppState>>,
 ) -> Html<String> {
     let cfg = state.config.load();
-    let statuses = state.fail2ban.all_statuses();
 
     let mut rows = String::new();
     for model in &cfg.models {
         for (i, ep) in model.endpoints.iter().enumerate() {
             let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-            let healthy = statuses
-                .iter()
-                .find(|(k, _)| k == &ep_key)
-                .map(|(_, ok)| *ok)
-                .unwrap_or(true);
+            let banned = state.fail2ban.is_banned(&ep_key);
+            let health = state.health_store.get(&ep_key);
+            let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+            let reason = if banned {
+                state.fail2ban.ban_reason(&ep_key).unwrap_or_default()
+            } else if !healthy {
+                health.as_ref().map(|h| h.last_error.clone()).unwrap_or_default()
+            } else {
+                String::new()
+            };
 
-            let reason = state.fail2ban.ban_reason(&ep_key).unwrap_or_default();
-
-            let color = if healthy { "#4caf50" } else { "#f44336" };
-            let status_text = if healthy { "UP" } else { "BANNED" };
+            let (color, status_text) = if banned {
+                ("#f44336", "BANNED")
+            } else if !healthy {
+                ("#ff9800", "DOWN")
+            } else {
+                ("#4caf50", "UP")
+            };
 
             rows.push_str(&format!(
                 "<tr>
@@ -113,6 +118,8 @@ pub async fn health_dashboard(
         .summary {{ display: flex; gap: 20px; margin: 20px 0; }}
         .card {{ background: #16213e; padding: 15px 25px; border-radius: 8px; }}
         .card .value {{ font-size: 2em; font-weight: bold; color: #7c4dff; }}
+        .legend {{ margin-top: 10px; font-size: 0.9em; color: #888; }}
+        .legend span {{ margin-right: 15px; }}
     </style>
 </head>
 <body>
@@ -122,6 +129,11 @@ pub async fn health_dashboard(
         <div class="card"><div>Endpoints</div><div class="value">{}</div></div>
         <div class="card"><div>Tokens</div><div class="value">{}</div></div>
         <div class="card"><div>Teams</div><div class="value">{}</div></div>
+    </div>
+    <div class="legend">
+        <span style='color:#4caf50'>● UP</span>
+        <span style='color:#ff9800'>● DOWN</span>
+        <span style='color:#f44336'>● BANNED</span>
     </div>
     <table>
         <tr><th>Model</th><th>EP #</th><th>URL</th><th>Status</th><th>Reason</th><th>RPM</th><th>TPM</th></tr>

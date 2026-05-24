@@ -1,26 +1,64 @@
-//! Фоновая проверка доступности забаненных эндпоинтов.
+//! Фоновая проверка доступности ВСЕХ эндпоинтов.
 //!
 //! Раз в `interval_secs` отправляет лёгкий запрос (`GET /v1/models`) на каждый
-//! забаненный эндпоинт. При успешном ответе (2xx) — снимает бан досрочно.
+//! эндпоинт. Результат сохраняется в `HealthStore` для дашборда.
+//! При успешном ответе на забаненный эндпоинт — снимает бан.
+//! При ошибке на незабаненный — записывает failure (может привести к бану).
 
 use arc_swap::ArcSwap;
+use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
 
+/// Состояние одного эндпоинта
+#[derive(Debug, Clone)]
+pub struct EndpointHealth {
+    pub healthy: bool,
+    pub last_check: Instant,
+    pub last_error: String,
+}
+
+/// Хранилище статусов здоровья эндпоинтов (ключ = "url:masked_key")
+#[derive(Default)]
+pub struct HealthStore {
+    states: DashMap<String, EndpointHealth>,
+}
+
+impl HealthStore {
+    pub fn new() -> Self {
+        Self { states: DashMap::new() }
+    }
+
+    pub fn get(&self, key: &str) -> Option<EndpointHealth> {
+        self.states.get(key).map(|e| e.clone())
+    }
+
+    pub fn set_healthy(&self, key: &str) {
+        self.states.insert(key.to_string(), EndpointHealth {
+            healthy: true,
+            last_check: Instant::now(),
+            last_error: String::new(),
+        });
+    }
+
+    pub fn set_unhealthy(&self, key: &str, error: &str) {
+        self.states.insert(key.to_string(), EndpointHealth {
+            healthy: false,
+            last_check: Instant::now(),
+            last_error: error.to_string(),
+        });
+    }
+}
+
 /// Запустить фоновый health checker.
-///
-/// Параметры:
-/// - `config` — для получения списка эндпоинтов
-/// - `fail2ban` — для сброса бана при успешной проверке
-/// - `client` — HTTP-клиент (с таймаутами)
-/// - `interval_secs` — периодичность проверки (0 = не запускать)
 pub fn start_background_health_checker(
     config: Arc<ArcSwap<AppConfig>>,
     fail2ban: Arc<Fail2ban>,
+    health_store: Arc<HealthStore>,
     client: Client,
     interval_secs: u64,
 ) {
@@ -30,26 +68,22 @@ pub fn start_background_health_checker(
     }
 
     let interval = Duration::from_secs(interval_secs);
-    tracing::info!(
-        interval_secs,
-        "Background health checker started"
-    );
+    tracing::info!(interval_secs, "Background health checker started");
 
     tokio::spawn(async move {
-        // Первая проверка через interval (не сразу при старте)
         tokio::time::sleep(interval).await;
 
         loop {
-            check_all_endpoints(&config, &fail2ban, &client).await;
+            check_all_endpoints(&config, &fail2ban, &health_store, &client).await;
             tokio::time::sleep(interval).await;
         }
     });
 }
 
-/// Проверить все забаненные эндпоинты.
 async fn check_all_endpoints(
     config: &ArcSwap<AppConfig>,
     fail2ban: &Fail2ban,
+    health_store: &HealthStore,
     client: &Client,
 ) {
     let cfg = config.load();
@@ -57,14 +91,8 @@ async fn check_all_endpoints(
     for model in &cfg.models {
         for ep in &model.endpoints {
             let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-
-            // Проверяем только забаненные
-            if !fail2ban.is_banned(&ep_key) {
-                continue;
-            }
-
-            // Лёгкий probing-запрос: GET /v1/models
             let probe_url = format!("{}/v1/models", ep.url.trim_end_matches('/'));
+
             match client
                 .get(&probe_url)
                 .header("Authorization", format!("Bearer {}", ep.key))
@@ -73,25 +101,39 @@ async fn check_all_endpoints(
                 .await
             {
                 Ok(resp) if resp.status().is_success() => {
-                    fail2ban.reset(&ep_key);
-                    tracing::info!(
-                        endpoint = %ep_key,
-                        status = resp.status().as_u16(),
-                        "Health check passed — endpoint unbanned"
-                    );
+                    health_store.set_healthy(&ep_key);
+                    if fail2ban.is_banned(&ep_key) {
+                        fail2ban.reset(&ep_key);
+                        tracing::info!(
+                            endpoint = %ep_key,
+                            status = resp.status().as_u16(),
+                            "Health check passed — endpoint unbanned"
+                        );
+                    }
                 }
                 Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let reason = format!("HTTP {status}");
+                    health_store.set_unhealthy(&ep_key, &reason);
                     tracing::debug!(
                         endpoint = %ep_key,
-                        status = resp.status().as_u16(),
-                        "Health check failed (non-2xx)"
+                        status,
+                        "Health check: non-2xx"
                     );
                 }
                 Err(e) => {
+                    let reason = if e.is_timeout() {
+                        "timeout".into()
+                    } else if e.is_connect() {
+                        "connection refused".into()
+                    } else {
+                        format!("{e}")
+                    };
+                    health_store.set_unhealthy(&ep_key, &reason);
                     tracing::debug!(
                         endpoint = %ep_key,
                         error = %e,
-                        "Health check failed (network error)"
+                        "Health check: network error"
                     );
                 }
             }

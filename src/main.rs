@@ -97,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Фоновая проверка эндпоинтов ────────────────────────────────────
     let health_check_interval = cfg.fail2ban.health_check_interval_secs;
+    let health_store = Arc::new(health::checker::HealthStore::new());
     let health_check_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
@@ -104,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     health::checker::start_background_health_checker(
         config.clone(),
         fail2ban.clone(),
+        health_store.clone(),
         health_check_client,
         health_check_interval,
     );
@@ -144,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
         sticky,
         stats: stats_writer,
         sync: sync_store,
+        health_store,
     });
 
     let prometheus_registry = prometheus::default_registry();

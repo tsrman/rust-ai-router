@@ -16,6 +16,7 @@ use std::task::{Context, Poll};
 use crate::auth::AuthContext;
 use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
+use crate::health::checker::HealthStore;
 use crate::metrics::prometheus;
 use crate::ratelimit::{self, RateLimiterStore};
 use crate::router::{ModelRouter, SelectedEndpoint, SessionStickyStore};
@@ -31,6 +32,7 @@ pub struct AppState {
     pub sticky: SessionStickyStore,
     pub stats: Arc<StatsWriter>,
     pub sync: Arc<crate::sync::SyncStore>,
+    pub health_store: Arc<HealthStore>,
 }
 
 /// Основной обработчик проксирования /v1/chat/completions etc.
