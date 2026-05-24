@@ -61,7 +61,8 @@ tower-cookies = "0.10"
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"], optional = true }
 
 # Optional Redis/Valkey (multi-instance sync)
-redis = { version = "0.25", features = ["tokio-comp", "aio"], optional = true }
+# Uses rustls (not native-tls) for musl compatibility
+redis = { version = "0.25", default-features = false, features = ["tokio-comp", "aio", "rustls"], optional = true }
 
 [features]
 default = ["postgres", "redis-sync"]
