@@ -125,7 +125,12 @@ pub struct ModelConfig {
     #[serde(default)]
     pub aliases: Vec<String>,
     pub endpoints: Vec<EndpointConfig>,
+    /// Тип модели: chat (по умолчанию), audio, embedding, completions, rerank
+    #[serde(default = "default_model_type")]
+    pub model_type: String,
 }
+
+fn default_model_type() -> String { "chat".into() }
 
 /// Эндпоинт (upstream API)
 #[derive(Debug, Clone, Serialize, Deserialize)]

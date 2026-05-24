@@ -857,17 +857,20 @@ pub async fn proxy_generic(
             .to_string();
         (bytes, model)
     } else {
-        // Non-JSON body (multipart/form-data etc.) — читаем как есть
+        // Non-JSON body — выбираем модель по типу из пути
         let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
             Ok(b) => b.to_vec(),
             Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response(),
         };
-        // Попробуем найти модель в пути (например /v1/audio/transcriptions → whisper-1)
-        let model = match cfg.models.first() {
-            Some(m) => m.name.clone(),
+        let model_type = req_path_type(&req_path);
+        let model = cfg.models.iter()
+            .find(|m| m.model_type == model_type)
+            .map(|m| m.name.clone())
+            .or_else(|| cfg.models.first().map(|m| m.name.clone()));
+        match model {
+            Some(m) => (bytes, m),
             None => return (StatusCode::SERVICE_UNAVAILABLE, "No models configured").into_response(),
-        };
-        (bytes, model)
+        }
     };
     let canonical_model = cfg.canonical_model_name(&model_name);
 
@@ -952,4 +955,13 @@ async fn proxy_raw(
     Ok(Response::builder()
         .status(status)
         .body(Body::from(body_bytes))?)
+}
+
+/// Определить тип модели по пути запроса
+fn req_path_type(path: &str) -> &str {
+    if path.contains("/audio/") { "audio" }
+    else if path.contains("/embeddings") { "embedding" }
+    else if path.contains("/rerank") { "rerank" }
+    else if path.contains("/completions") && !path.contains("/chat/") { "completions" }
+    else { "chat" }
 }

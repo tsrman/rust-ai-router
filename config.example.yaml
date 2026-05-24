@@ -137,6 +137,7 @@ models:
   # GPT-4o — two endpoints for load balancing
   # =========================================================================
   - name: "gpt-4o"
+    model_type: chat                   # chat (default) | audio | embedding | completions | rerank
     aliases: ["gpt-4", "gpt-4-turbo", "gpt-4-vision", "gpt-4-vision-preview"]
     endpoints:
 
