@@ -35,7 +35,10 @@ server:
 # Teams define what models a group of users can access and what rate limits
 # they have. Tokens inherit from teams (see TOKENS section below).
 #
-# Inheritance: token.field overrides team.field. Team.field is the fallback.
+# Inheritance: token.field overrides team.field.
+# Team limits are a SHARED budget — all tokens in the team share one counter.
+# Each token can also have its own personal limit on top.
+# Rate limit order: team shared budget → token personal limit
 #
 teams:
 

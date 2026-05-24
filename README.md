@@ -149,21 +149,31 @@ server:
 
 Teams define groups of users with shared model access and rate limits.
 
+**Team limits are a SHARED budget** — all tokens in the team draw from the same
+RPM/TPM pool. Each token can also have its own personal limit on top.
+
 ```yaml
 teams:
   - name: "admin"            # Team name (used by tokens)
     models: ["*"]            # Allowed models — "*" = all models
     limits:
-      rpm: 10000             # Requests per minute (default: 0 = unlimited)
-      tpm: 5000000           # Tokens per minute (default: 0 = unlimited)
+      rpm: 10000             # Shared budget across ALL admin tokens
+      tpm: 5000000           # Shared token budget
     cost_multiplier: 1.0     # Cost multiplier for billing (default: 1.0)
 
   - name: "developers"
     models: ["gpt-4o", "gpt-4o-mini"]
     limits:
-      rpm: 500
+      rpm: 500               # All developer tokens share 500 RPM
       tpm: 200000
 ```
+
+Rate limit order: **team shared budget → token personal limit**
+
+| Level | Key | Scope |
+|-------|-----|-------|
+| Team | `team:<name>` | All tokens in the team share one counter |
+| Token | `<token_key>` | Per-token limit (inherits from team if not set) |
 
 ### Tokens
 
