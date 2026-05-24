@@ -87,7 +87,8 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Компоненты ─────────────────────────────────────────────────────
     let mdl_router = ModelRouter::new(config.clone());
-    let rate_limiters = ratelimit::RateLimiterStore::new();
+    let rate_limiters = Arc::new(ratelimit::RateLimiterStore::new());
+    ratelimit::RateLimiterStore::start_cleanup(rate_limiters.clone());
     let fail2ban = Arc::new(fail2ban::Fail2ban::new(
         cfg.fail2ban.max_failures,
         cfg.fail2ban.ban_duration_secs,

@@ -122,7 +122,18 @@ impl StatsWriter {
             crate::metrics::prometheus::POSTGRES_CONNECTED.set(1);
             let _ = tx.send(pool);
         });
-        let pool = tokio::task::block_in_place(|| rx.blocking_recv().unwrap());
+        let pool = match tokio::task::block_in_place(|| rx.blocking_recv()) {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::error!("PostgreSQL connection task panicked or was cancelled");
+                return Self {
+                    pool: None,
+                    retention_days,
+                    cleanup_interval_secs,
+                    aggregation_interval_secs,
+                };
+            }
+        };
 
         Self {
             pool: Some(pool),

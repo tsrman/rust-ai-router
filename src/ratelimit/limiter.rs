@@ -184,4 +184,21 @@ mod tests {
     }
 }
 
+impl RateLimiterStore {
+    /// Периодическая очистка неактивных записей (вызывать в фоне)
+    pub fn start_cleanup(store: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                let before = store.limiters.len();
+                store.limiters.retain(|_, pair| {
+                    pair.rpm.len() > 0 || pair.tpm.len() > 0
+                });
+                if store.limiters.len() < before {
+                    tracing::debug!(before, after = store.limiters.len(), "Rate limiter cleanup");
+                }
+            }
+        });
+    }
+}
 // TPM test at the end (outside the test module, runnable via cargo test)

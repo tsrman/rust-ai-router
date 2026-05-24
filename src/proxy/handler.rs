@@ -24,7 +24,7 @@ use crate::stats::StatsWriter;
 
 /// Состояние rate-limiting (локальный governor + sync Redis)
 pub struct RateLimitState {
-    pub limiters: RateLimiterStore,
+    pub limiters: Arc<RateLimiterStore>,
     pub fail2ban: Arc<Fail2ban>,
     pub sync: Arc<crate::sync::SyncStore>,
 }

@@ -48,14 +48,15 @@ impl Fail2ban {
     /// Проверить, не забанен ли эндпоинт
     pub fn is_banned(&self, endpoint_key: &str) -> bool {
         if let Some(state) = self.states.get(endpoint_key) {
-            let banned = state.banned_until.lock();
+            // Держим один lock на всю проверку — предотвращает TOCTOU
+            let mut banned = state.banned_until.lock();
             if let Some(until) = *banned {
                 if Instant::now() < until {
                     return true;
                 }
-                drop(banned);
+                // Истёк — сбрасываем
                 state.consecutive_failures.store(0, Ordering::Relaxed);
-                *state.banned_until.lock() = None;
+                *banned = None;
             }
         }
         false
