@@ -324,9 +324,10 @@ session:
 sync:
   enabled: false                                    # Set to true to enable
   redis_url: "redis://valkey:6379/0"               # Redis/Valkey connection URL
-  key_prefix: "oar"                                 # Key prefix for isolation
   # redis_url: "redis://user:pass@host:6379/1"     # With auth + db number
+  key_prefix: "oar"                                 # Key prefix for isolation
   # key_prefix: "production"                        # Different per environment
+  fail_open: true                                   # Redis down → allow (true) or reject (false)
 
 # ===========================================================================
 # STATS — optional PostgreSQL statistics

@@ -566,9 +566,12 @@ sync:
   enabled: true
   redis_url: "redis://valkey:6379/0"
   key_prefix: "oar"
+  fail_open: true               # If Redis is down: true=allow without limits, false=reject
 ```
 
-### Build with sync
+`fail_open` determines behavior when Redis/Valkey is unreachable:
+- `true` (default) — requests pass without shared rate limits
+- `false` — requests are rejected until Redis recovers
 
 ```bash
 cargo build --release --features redis-sync
