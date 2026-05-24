@@ -160,10 +160,28 @@ mod tests {
     #[test]
     fn test_rate_limit_different_keys_independent() {
         let store = RateLimiterStore::new();
-        // Exhaust key1
         store.check("key1", 1, 0, 1, RateLimitScope::Token);
         assert!(!store.check("key1", 1, 0, 1, RateLimitScope::Token).allowed);
-        // key2 should still work
         assert!(store.check("key2", 1, 0, 1, RateLimitScope::Token).allowed);
     }
+
+    #[test]
+    fn test_tpm_check_n_blocks_after_limit() {
+        let store = RateLimiterStore::new();
+        // TPM=5, each request consumes 3 tokens → second request blocked
+        assert!(store.check("tpm-key", 0, 5, 3, RateLimitScope::Token).allowed);
+        assert!(!store.check("tpm-key", 0, 5, 3, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_tpm_check_n_allows_within_limit() {
+        let store = RateLimiterStore::new();
+        // TPM=10, each consumes 2 → 5 fit
+        for _ in 0..5 {
+            assert!(store.check("tpm-key", 0, 10, 2, RateLimitScope::Token).allowed);
+        }
+        assert!(!store.check("tpm-key", 0, 10, 2, RateLimitScope::Token).allowed);
+    }
 }
+
+// TPM test at the end (outside the test module, runnable via cargo test)

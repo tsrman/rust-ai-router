@@ -122,7 +122,7 @@ impl StatsWriter {
             crate::metrics::prometheus::POSTGRES_CONNECTED.set(1);
             let _ = tx.send(pool);
         });
-        let pool = rx.blocking_recv().unwrap();
+        let pool = tokio::task::block_in_place(|| rx.blocking_recv().unwrap());
 
         Self {
             pool: Some(pool),
