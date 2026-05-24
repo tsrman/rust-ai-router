@@ -249,7 +249,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Server ready, accepting connections");
 
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            tracing::info!("SIGTERM received, shutting down gracefully...");
+        })
+        .await?;
 
     Ok(())
 }

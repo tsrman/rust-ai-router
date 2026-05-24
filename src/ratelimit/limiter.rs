@@ -68,10 +68,10 @@ impl RateLimiterStore {
             }
         }
 
-        // TPM проверка
+        // TPM проверка (capped loop, практично для MVP)
         if tpm > 0 && estimated_tokens > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
-            for _ in 0..estimated_tokens.min(1000) {  // cap at 1000 to avoid excessive looping
+            for _ in 0..estimated_tokens.min(100) {
                 match pair.tpm.check_key(&key.to_string()) {
                     Err(not_until) => {
                         let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());

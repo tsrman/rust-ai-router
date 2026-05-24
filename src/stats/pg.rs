@@ -34,10 +34,10 @@ impl StatsWriter {
         }
 
         let db_url = database_url.to_string();
-        let pool = std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let pool = PgPoolOptions::new()
+        // Use tokio::spawn + oneshot channel instead of thread::spawn + block_on
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let pool = PgPoolOptions::new()
                     .max_connections(5)
                     .connect(&db_url)
                     .await
@@ -118,10 +118,10 @@ impl StatsWriter {
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_requests_ts_cost ON requests (timestamp, cost_approx)")
                     .execute(&pool).await.ok();
 
-                tracing::info!("PostgreSQL stats connected, tables created");
-                pool
-            })
-        }).join().unwrap();
+            tracing::info!("PostgreSQL stats connected, tables created");
+            let _ = tx.send(pool);
+        });
+        let pool = rx.blocking_recv().unwrap();
 
         Self {
             pool: Some(pool),
