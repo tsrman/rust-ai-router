@@ -198,46 +198,10 @@ pub async fn proxy_handler(
     };
 
     // Rate limiting: команда (общий бюджет) → токен (персональный)
-    let team_limits = cfg.teams.iter().find(|t| t.name == team)
-        .and_then(|t| t.limits.as_ref());
-    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
-    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
-
-    if team_rpm > 0 {
-        let team_key = format!("team:{team}");
-        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
-        if !sync_rl.allowed {
-            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
-            return rate_limit_response(&sync_rl, &format!("Team '{team}' (shared)"));
-        }
-    }
-    if team_rpm > 0 || team_tpm > 0 {
-        let team_key = format!("team:{team}");
-        let team_rl = state.rate_limiters.check(
-            &team_key, team_rpm, team_tpm, 1,
-            ratelimit::RateLimitScope::Token,
-        );
-        if !team_rl.allowed {
-            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
-            return rate_limit_response(&team_rl, &format!("Team '{team}'"));
-        }
-    }
-
-    // Rate limiting: токен (sync → локальный)
-    if token_rpm > 0 {
-        let sync_rl = state.sync.check_rate_limit("token", &token_key, token_rpm as u64).await;
-        if !sync_rl.allowed {
-            prometheus::RATE_LIMIT_HITS.with_label_values(&["token", &token_key]).inc();
-            return rate_limit_response(&sync_rl, "Token (shared)");
-        }
-    }
-    let token_rl = state.rate_limiters.check(
-        &token_key, token_rpm, token_tpm, 1,
-        ratelimit::RateLimitScope::Token,
-    );
-    if !token_rl.allowed {
-        prometheus::RATE_LIMIT_HITS.with_label_values(&["token", &token_key]).inc();
-        return rate_limit_response(&token_rl, "Token");
+    if let Some(rl_resp) = check_all_rate_limits(
+        &state, &cfg, &team, &token_key, token_rpm, token_tpm
+    ).await {
+        return rl_resp;
     }
 
     // ── Ретрай-луп ──────────────────────────────────────────────────
@@ -806,37 +770,11 @@ pub async fn proxy_generic(
 
     let cfg = state.config.load();
 
-    // Team rate-limit
-    let team_limits = cfg.teams.iter().find(|t| t.name == auth.team)
-        .and_then(|t| t.limits.as_ref());
-    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
-    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
-
-    if team_rpm > 0 {
-        let team_key = format!("team:{}", auth.team);
-        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
-        if !sync_rl.allowed {
-            return rate_limit_response(&sync_rl, &format!("Team '{}' (shared)", auth.team));
-        }
-    }
-    if team_rpm > 0 || team_tpm > 0 {
-        let team_key = format!("team:{}", auth.team);
-        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, ratelimit::RateLimitScope::Token);
-        if !team_rl.allowed {
-            return rate_limit_response(&team_rl, &format!("Team '{}'", auth.team));
-        }
-    }
-
-    // Token rate-limit
-    if auth.rpm > 0 {
-        let sync_rl = state.sync.check_rate_limit("token", &auth.token_key, auth.rpm as u64).await;
-        if !sync_rl.allowed {
-            return rate_limit_response(&sync_rl, "Token (shared)");
-        }
-    }
-    let token_rl = state.rate_limiters.check(&auth.token_key, auth.rpm, auth.tpm, 1, ratelimit::RateLimitScope::Token);
-    if !token_rl.allowed {
-        return rate_limit_response(&token_rl, "Token");
+    // Team rate-limit → token
+    if let Some(rl_resp) = check_all_rate_limits(
+        &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
+    ).await {
+        return rl_resp;
     }
 
     // Read body (extract path first — req moves into read_body_and_parse)
@@ -1002,4 +940,53 @@ fn parse_multipart_model(body: &[u8], content_type: &str) -> Option<String> {
     let value_start = after_marker.find("\r\n\r\n")? + 4;
     let value_end = after_marker[value_start..].find('\r')?;
     Some(after_marker[value_start..value_start + value_end].trim().to_string())
+}
+
+/// Shared rate-limit check: team → token. Returns Some(response) if limited.
+pub async fn check_all_rate_limits(
+    state: &AppState,
+    cfg: &AppConfig,
+    team: &str,
+    token_key: &str,
+    token_rpm: u32,
+    token_tpm: u64,
+) -> Option<axum::response::Response> {
+    // Team (shared budget)
+    let team_limits = cfg.teams.iter().find(|t| t.name == team)
+        .and_then(|t| t.limits.as_ref());
+    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
+    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
+
+    if team_rpm > 0 {
+        let team_key = format!("team:{team}");
+        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
+        if !sync_rl.allowed {
+            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
+            return Some(rate_limit_response(&sync_rl, &format!("Team '{team}' (shared)")));
+        }
+    }
+    if team_rpm > 0 || team_tpm > 0 {
+        let team_key = format!("team:{team}");
+        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, ratelimit::RateLimitScope::Token);
+        if !team_rl.allowed {
+            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
+            return Some(rate_limit_response(&team_rl, &format!("Team '{team}'")));
+        }
+    }
+
+    // Token (personal)
+    if token_rpm > 0 {
+        let sync_rl = state.sync.check_rate_limit("token", token_key, token_rpm as u64).await;
+        if !sync_rl.allowed {
+            prometheus::RATE_LIMIT_HITS.with_label_values(&["token", token_key]).inc();
+            return Some(rate_limit_response(&sync_rl, "Token (shared)"));
+        }
+    }
+    let token_rl = state.rate_limiters.check(token_key, token_rpm, token_tpm, 1, ratelimit::RateLimitScope::Token);
+    if !token_rl.allowed {
+        prometheus::RATE_LIMIT_HITS.with_label_values(&["token", token_key]).inc();
+        return Some(rate_limit_response(&token_rl, "Token"));
+    }
+
+    None
 }

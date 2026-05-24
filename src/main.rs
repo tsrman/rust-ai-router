@@ -279,42 +279,10 @@ async fn list_models(
     let cfg = state.config.load();
 
     // Rate limiting: команда → токен
-    let team_limits = cfg.teams.iter().find(|t| t.name == auth.team)
-        .and_then(|t| t.limits.as_ref());
-    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
-    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
-
-    if team_rpm > 0 {
-        let team_key = format!("team:{}", auth.team);
-        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
-        if !sync_rl.allowed {
-            return proxy::handler::rate_limit_response(&sync_rl, &format!("Team '{}' (shared)", auth.team));
-        }
-    }
-    if team_rpm > 0 || team_tpm > 0 {
-        let team_key = format!("team:{}", auth.team);
-        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, RateLimitScope::Token);
-        if !team_rl.allowed {
-            return proxy::handler::rate_limit_response(&team_rl, &format!("Team '{}'", auth.team));
-        }
-    }
-
-    // Rate limiting (sync → локальный) for token
-    if auth.rpm > 0 {
-        let sync_rl = state.sync.check_rate_limit("token", &auth.token_key, auth.rpm as u64).await;
-        if !sync_rl.allowed {
-            return proxy::handler::rate_limit_response(&sync_rl, "Token (shared)");
-        }
-    }
-    let rl = state.rate_limiters.check(
-        &auth.token_key, auth.rpm, auth.tpm, 1,
-        RateLimitScope::Token,
-    );
-    if !rl.allowed {
-        crate::metrics::prometheus::RATE_LIMIT_HITS
-            .with_label_values(&["token", &auth.token_key])
-            .inc();
-        return proxy::handler::rate_limit_response(&rl, "Token");
+    if let Some(rl_resp) = proxy::handler::check_all_rate_limits(
+        &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
+    ).await {
+        return rl_resp;
     }
 
     let models: Vec<serde_json::Value> = cfg
