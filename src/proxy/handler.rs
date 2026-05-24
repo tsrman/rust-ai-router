@@ -840,17 +840,36 @@ pub async fn proxy_generic(
     let req_path = req.uri().path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let (body_bytes, body_json) = match read_body_and_parse(req).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
 
-    // Extract model from body
-    let model_name = body_json
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let canonical_model = cfg.canonical_model_name(model_name);
+    let content_type = req.headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let (body_bytes, model_name) = if content_type.starts_with("application/json") {
+        let (bytes, json) = match read_body_and_parse(req).await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+        let model = json.get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        (bytes, model)
+    } else {
+        // Non-JSON body (multipart/form-data etc.) — читаем как есть
+        let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
+            Ok(b) => b.to_vec(),
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response(),
+        };
+        // Попробуем найти модель в пути (например /v1/audio/transcriptions → whisper-1)
+        let model = match cfg.models.first() {
+            Some(m) => m.name.clone(),
+            None => return (StatusCode::SERVICE_UNAVAILABLE, "No models configured").into_response(),
+        };
+        (bytes, model)
+    };
+    let canonical_model = cfg.canonical_model_name(&model_name);
 
     // Check model access
     if !cfg.token_has_model_access(&auth.token_key, &canonical_model) {
@@ -922,7 +941,6 @@ async fn proxy_raw(
     let resp = client
         .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
         .body(body.to_vec())
         .send()
         .await?;
