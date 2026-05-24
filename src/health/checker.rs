@@ -115,11 +115,10 @@ async fn check_all_endpoints(
                     let status = resp.status().as_u16();
                     let reason = format!("HTTP {status}");
                     health_store.set_unhealthy(&ep_key, &reason);
-                    tracing::debug!(
-                        endpoint = %ep_key,
-                        status,
-                        "Health check: non-2xx"
-                    );
+                    if !fail2ban.is_banned(&ep_key) {
+                        fail2ban.record_failure_with_code(&ep_key, status);
+                    }
+                    tracing::debug!(endpoint = %ep_key, status, "Health check: non-2xx");
                 }
                 Err(e) => {
                     let reason = if e.is_timeout() {
@@ -130,11 +129,10 @@ async fn check_all_endpoints(
                         format!("{e}")
                     };
                     health_store.set_unhealthy(&ep_key, &reason);
-                    tracing::debug!(
-                        endpoint = %ep_key,
-                        error = %e,
-                        "Health check: network error"
-                    );
+                    if !fail2ban.is_banned(&ep_key) {
+                        fail2ban.record_failure(&ep_key);
+                    }
+                    tracing::debug!(endpoint = %ep_key, error = %e, "Health check: network error");
                 }
             }
         }
