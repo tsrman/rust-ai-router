@@ -68,22 +68,30 @@ impl RateLimiterStore {
             }
         }
 
-        // TPM проверка (capped loop, практично для MVP)
+        // TPM проверка (атомарно — check_key_n для N токенов)
         if tpm > 0 && estimated_tokens > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
-            for _ in 0..estimated_tokens.min(100) {
-                match pair.tpm.check_key(&key.to_string()) {
-                    Err(not_until) => {
-                        let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());
-                        return RateLimitResult {
-                            allowed: false,
-                            limit: tpm,
-                            reset_after_secs: wait.as_secs_f64(),
-                            scope,
-                        };
-                    }
-                    Ok(_) => {}
+            let n = NonZeroU32::new(estimated_tokens as u32).unwrap_or(NonZeroU32::MIN);
+            match pair.tpm.check_key_n(&key.to_string(), n) {
+                Err(_insufficient) => {
+                    // Запрос с estimated_tokens > capacity бакета — всегда отклоняем
+                    return RateLimitResult {
+                        allowed: false,
+                        limit: tpm,
+                        reset_after_secs: 60.0,
+                        scope,
+                    };
                 }
+                Ok(Err(not_until)) => {
+                    let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());
+                    return RateLimitResult {
+                        allowed: false,
+                        limit: tpm,
+                        reset_after_secs: wait.as_secs_f64(),
+                        scope,
+                    };
+                }
+                Ok(Ok(_)) => {}  // запрос разрешён
             }
         }
 
