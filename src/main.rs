@@ -268,7 +268,30 @@ async fn list_models(
         None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
     };
 
-    // Rate limiting (sync → локальный)
+    let cfg = state.config.load();
+
+    // Rate limiting: команда → токен
+    let team_limits = cfg.teams.iter().find(|t| t.name == auth.team)
+        .and_then(|t| t.limits.as_ref());
+    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
+    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
+
+    if team_rpm > 0 {
+        let team_key = format!("team:{}", auth.team);
+        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
+        if !sync_rl.allowed {
+            return proxy::handler::rate_limit_response(&sync_rl, &format!("Team '{}' (shared)", auth.team));
+        }
+    }
+    if team_rpm > 0 || team_tpm > 0 {
+        let team_key = format!("team:{}", auth.team);
+        let team_rl = state.rate_limiters.check(&team_key, team_rpm, team_tpm, 1, RateLimitScope::Token);
+        if !team_rl.allowed {
+            return proxy::handler::rate_limit_response(&team_rl, &format!("Team '{}'", auth.team));
+        }
+    }
+
+    // Rate limiting (sync → локальный) for token
     if auth.rpm > 0 {
         let sync_rl = state.sync.check_rate_limit("token", &auth.token_key, auth.rpm as u64).await;
         if !sync_rl.allowed {
@@ -286,7 +309,6 @@ async fn list_models(
         return proxy::handler::rate_limit_response(&rl, "Token");
     }
 
-    let cfg = state.config.load();
     let models: Vec<serde_json::Value> = cfg
         .models
         .iter()

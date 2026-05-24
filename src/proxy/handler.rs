@@ -194,6 +194,32 @@ pub async fn proxy_handler(
         }
     };
 
+    // Rate limiting: команда (общий бюджет) → токен (персональный)
+    let team_limits = cfg.teams.iter().find(|t| t.name == team)
+        .and_then(|t| t.limits.as_ref());
+    let team_rpm = team_limits.map(|l| l.rpm).unwrap_or(0);
+    let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
+
+    if team_rpm > 0 {
+        let team_key = format!("team:{team}");
+        let sync_rl = state.sync.check_rate_limit("team", &team_key, team_rpm as u64).await;
+        if !sync_rl.allowed {
+            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
+            return rate_limit_response(&sync_rl, &format!("Team '{team}' (shared)"));
+        }
+    }
+    if team_rpm > 0 || team_tpm > 0 {
+        let team_key = format!("team:{team}");
+        let team_rl = state.rate_limiters.check(
+            &team_key, team_rpm, team_tpm, 1,
+            ratelimit::RateLimitScope::Token,
+        );
+        if !team_rl.allowed {
+            prometheus::RATE_LIMIT_HITS.with_label_values(&["team", &team_key]).inc();
+            return rate_limit_response(&team_rl, &format!("Team '{team}'"));
+        }
+    }
+
     // Rate limiting: токен (sync → локальный)
     if token_rpm > 0 {
         let sync_rl = state.sync.check_rate_limit("token", &token_key, token_rpm as u64).await;
