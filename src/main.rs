@@ -217,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/messages", post(proxy::handler::proxy_handler))
         .route("/v1/models", get(list_models))
         // Fallback: любые другие v1-эндпоинты (embeddings, rerank, tokenize, etc.)
-        .route("/v1/{*path}", post(proxy::handler::proxy_generic))
+        .fallback(proxy::handler::proxy_generic)
         .layer(trace_layer)
         .layer(cors);
 
