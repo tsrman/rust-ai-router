@@ -844,7 +844,8 @@ pub async fn proxy_generic(
     let content_type = req.headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .unwrap_or("")
+        .to_string();
 
     let (body_bytes, model_name) = if content_type.starts_with("application/json") {
         let (bytes, json) = match read_body_and_parse(req).await {
@@ -857,16 +858,28 @@ pub async fn proxy_generic(
             .to_string();
         (bytes, model)
     } else {
-        // Non-JSON body — выбираем модель по типу из пути
+        // Non-JSON body — для multipart парсим поле model из формы
         let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
             Ok(b) => b.to_vec(),
             Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response(),
         };
-        let model_type = req_path_type(&req_path);
-        let model = cfg.models.iter()
-            .find(|m| m.model_type == model_type)
-            .map(|m| m.name.clone())
+
+        let model = if content_type.starts_with("multipart/form-data") {
+            parse_multipart_model(&bytes, &content_type)
+        } else {
+            None
+        };
+
+        let model = model
+            .or_else(|| {
+                // Fallback: ищем модель нужного типа из пути
+                let model_type = req_path_type(&req_path);
+                cfg.models.iter()
+                    .find(|m| m.model_type == model_type)
+                    .map(|m| m.name.clone())
+            })
             .or_else(|| cfg.models.first().map(|m| m.name.clone()));
+
         match model {
             Some(m) => (bytes, m),
             None => return (StatusCode::SERVICE_UNAVAILABLE, "No models configured").into_response(),
@@ -964,4 +977,26 @@ fn req_path_type(path: &str) -> &str {
     else if path.contains("/rerank") { "rerank" }
     else if path.contains("/completions") && !path.contains("/chat/") { "completions" }
     else { "chat" }
+}
+
+/// Извлечь имя модели из multipart/form-data поля "model"
+fn parse_multipart_model(body: &[u8], content_type: &str) -> Option<String> {
+    // Извлекаем boundary из Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+    let boundary = content_type
+        .split("boundary=")
+        .nth(1)?
+        .trim()
+        .trim_matches('"');
+
+    // Ищем поле model в теле по упрощённому алгоритму (без полноценного парсинга)
+    // Мультипарт структура: --boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nVALUE\r\n
+    let model_marker = format!("name=\"model\"");
+    let body_str = String::from_utf8_lossy(body);
+    let pos = body_str.find(&model_marker)?;
+
+    // После marker идёт \r\n\r\n, затем значение до \r\n
+    let after_marker = &body_str[pos + model_marker.len()..];
+    let value_start = after_marker.find("\r\n\r\n")? + 4;
+    let value_end = after_marker[value_start..].find('\r')?;
+    Some(after_marker[value_start..value_start + value_end].trim().to_string())
 }

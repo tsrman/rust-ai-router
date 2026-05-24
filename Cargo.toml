@@ -9,8 +9,9 @@ description = "High-performance OpenAI-compatible API router with load balancing
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# HTTP framework
-axum = { version = "0.7", features = ["macros"] }
+# HTTP
+axum = { version = "0.7", features = ["macros", "multipart"] }
+multer = "3"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "trace", "auth"] }
 
