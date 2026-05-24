@@ -190,12 +190,6 @@ fn parse_fail_patterns(codes: &[String]) -> Vec<FailPattern> {
         .collect()
 }
 
-impl Clone for Fail2ban {
-    fn clone(&self) -> Self {
-        panic!("Fail2ban should not be cloned; wrap in Arc instead")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -33,7 +33,12 @@ pub struct ServerConfig {
     pub base_path: String,
     #[serde(default)]
     pub timeouts: TimeoutConfig,
+    /// Максимальный размер тела запроса в байтах (по умолчанию 10MB)
+    #[serde(default = "default_max_body_size")]
+    pub max_body_size: usize,
 }
+
+fn default_max_body_size() -> usize { 10 * 1024 * 1024 }  // 10MB
 
 fn default_listen() -> String {
     "0.0.0.0:8080".into()

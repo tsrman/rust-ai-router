@@ -214,4 +214,17 @@ mod tests {
         assert!(!is_anthropic_request("/v1/chat/completions"));
         assert!(!is_anthropic_request("/health"));
     }
+
+    #[test]
+    fn test_translate_request_preserves_stream() {
+        let input = json!({
+            "model": "claude-3",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true,
+            "max_tokens": 10
+        });
+        let (openai, _) = translate_request(&input);
+        assert_eq!(openai["stream"], true);
+        assert_eq!(openai["max_tokens"], 10);
+    }
 }

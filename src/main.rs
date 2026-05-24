@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         stats: stats_writer,
         sync: sync_store,
         health_store,
+        sticky_ttl_secs: cfg.session.sticky_ttl_secs,
     });
 
     let prometheus_registry = prometheus::default_registry();

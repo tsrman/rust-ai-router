@@ -33,6 +33,7 @@ pub struct AppState {
     pub stats: Arc<StatsWriter>,
     pub sync: Arc<crate::sync::SyncStore>,
     pub health_store: Arc<HealthStore>,
+    pub sticky_ttl_secs: u64,
 }
 
 /// Основной обработчик проксирования /v1/chat/completions etc.
@@ -309,8 +310,9 @@ pub async fn proxy_handler(
                         let sync = state.sync.clone();
                         let sid_clone = sid.clone();
                         let idx = current_endpoint.index;
+                        let ttl = state.sticky_ttl_secs;
                         tokio::spawn(async move {
-                            sync.set_sticky(&sid_clone, idx, 300).await;
+                            sync.set_sticky(&sid_clone, idx, ttl).await;
                         });
                     }
 
@@ -476,7 +478,7 @@ fn insert_header(headers: &mut axum::http::HeaderMap, name: &str, value: &str) {
 
 /// Читаем тело запроса и парсим JSON (единоразово)
 async fn read_body_and_parse(req: Request<Body>) -> Result<(Vec<u8>, serde_json::Value), Response> {
-    let bytes = axum::body::to_bytes(req.into_body(), 1024 * 1024)
+    let bytes = axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024)  // 50MB hard cap
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response())?;
 
