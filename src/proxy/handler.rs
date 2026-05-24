@@ -600,7 +600,14 @@ impl Stream for SseStream {
             match self.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.buffer.extend_from_slice(&chunk);
-
+                    // Защита от бесконечного роста (1MB max)
+                    if self.buffer.len() > 1_048_576 {
+                        tracing::error!("SSE buffer overflow ({} bytes), truncating", self.buffer.len());
+                        self.buffer.clear();
+                        return Poll::Ready(Some(Ok(Event::default().data(
+                            r#"{"error":"buffer overflow"}"#
+                        ))));
+                    }
                     while let Some(pos) = find_sse_boundary(&self.buffer) {
                         let event_bytes = self.buffer[..pos].to_vec();
                         self.buffer.drain(..pos + 2);
@@ -616,6 +623,13 @@ impl Stream for SseStream {
                     ))));
                 }
                 Poll::Ready(None) => {
+                    // Отдаём оставшиеся события из буфера по одному
+                    if let Some(pos) = find_sse_boundary(&self.buffer) {
+                        let event_bytes = self.buffer[..pos].to_vec();
+                        self.buffer.drain(..pos + 2);
+                        let event_str = String::from_utf8_lossy(&event_bytes);
+                        return Poll::Ready(Some(Ok(Event::default().data(event_str.to_string()))));
+                    }
                     if !self.buffer.is_empty() {
                         let remaining = String::from_utf8_lossy(&self.buffer).to_string();
                         self.buffer.clear();
