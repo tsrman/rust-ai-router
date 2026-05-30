@@ -7,7 +7,23 @@
 #   1. Copy:  cp config.example.yaml config.yaml
 #   2. Edit:  replace API keys and token secrets
 #   3. Run:   ./target/release/openai-router config.yaml
-#   4. Test:  curl -H "Authorization: Bearer sk-admin-xxx" localhost:8080/v1/models
+#   4. Test:  curl -H "Authorization: Bearer *** localhost:8080/v1/models
+# =============================================================================
+#
+# ── Environment Variables ────────────────────────────────────────────────────
+# You can use env-var substitution in any string value:
+#   ${VAR}          — required variable (error if not set)
+#   ${VAR:-default} — variable with fallback default
+#
+# Example:
+#   tokens:
+#     - key: "${API_TOKEN}"
+#       team: "default"
+#   sync:
+#     redis_url: "${REDIS_URL:-redis://localhost:6379}"
+#
+# The router also loads .env file automatically (if present in working dir).
+# Priority: env var > .env file > ${VAR:-default} > hardcoded value
 # =============================================================================
 
 # ---------------------------------------------------------------------------

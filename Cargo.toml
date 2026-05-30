@@ -55,6 +55,9 @@ thiserror = "1"
 anyhow = "1"
 bytes = "1"
 
+# Env vars
+dotenvy = "0.15"
+
 # JSON pointer for path access
 tower-cookies = "0.10"
 
