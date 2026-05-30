@@ -937,7 +937,7 @@ async fn proxy_raw(
         .await?;
 
     let status = resp.status();
-    let headers = resp.headers().clone();
+    let _headers = resp.headers().clone();
     let body_bytes = resp.bytes().await?;
 
     Ok(Response::builder()
@@ -962,6 +962,7 @@ fn parse_multipart_model(body: &[u8], content_type: &str) -> Option<String> {
         .nth(1)?
         .trim()
         .trim_matches('"');
+    let _boundary = boundary;
 
     // Ищем поле model в теле по упрощённому алгоритму (без полноценного парсинга)
     // Мультипарт структура: --boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nVALUE\r\n

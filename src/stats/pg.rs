@@ -423,6 +423,7 @@ pub struct StatsWriter;
 impl StatsWriter {
     pub fn new(
         _url: &str,
+        _enabled: bool,
         _retention_days: u32,
         _cleanup_interval_secs: u64,
         _aggregation_interval_secs: u64,

@@ -278,7 +278,6 @@ async fn list_models(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     use axum::http::StatusCode;
-    use crate::ratelimit::RateLimitScope;
 
     let auth = match req.extensions().get::<crate::auth::AuthContext>() {
         Some(ctx) => ctx.clone(),
