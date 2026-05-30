@@ -19,12 +19,13 @@ pub struct StatsWriter {
 impl StatsWriter {
     pub fn new(
         database_url: &str,
+        enabled: bool,
         retention_days: u32,
         cleanup_interval_secs: u64,
         aggregation_interval_secs: u64,
     ) -> Self {
-        if database_url.is_empty() {
-            tracing::info!("PostgreSQL stats disabled (empty URL)");
+        if !enabled || database_url.is_empty() {
+            tracing::info!("PostgreSQL stats disabled (enabled={}, url_empty={})", enabled, database_url.is_empty());
             return Self {
                 pool: None,
                 retention_days,

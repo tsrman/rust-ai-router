@@ -135,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
 
     let stats_writer = Arc::new(stats::StatsWriter::new(
         &cfg.stats.postgres_url.clone().unwrap_or_default(),
+        cfg.stats.enabled,
         cfg.stats.retention_days,
         cfg.stats.cleanup_interval_secs,
         cfg.stats.aggregation_interval_secs,
