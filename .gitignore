@@ -1,33 +1,30 @@
+
 # Build
-/target/
+# Config (contains secrets — use config.example.yaml as template)
+# Docker volumes
+# Env
+# IDE
+# OS
+*.env.local
 *.o
 *.so
-
-# IDE
+*.swo
+*.swp
+*~
+.DS_Store
+.env
 .idea/
 .vscode/
-*.swp
-*.swo
-*~
-
-# Config (contains secrets — use config.example.yaml as template)
+/target/
+Thumbs.db
 config.yaml
-config_test.yaml
-config_minimal.yaml
 config_deepseek.yaml
-config_standalone.yaml
-config_vhealth.yaml
 config_f2b_test.yaml
+config_minimal.yaml
+config_standalone.yaml
+config_test.yaml
+config_vhealth.yaml
 docker/config_docker.secret.yaml
-
-# Docker volumes
+docker/config_docker.yaml
 docker/pg_data/
 docker/valkey_data/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Env
-.env
-*.env.local
