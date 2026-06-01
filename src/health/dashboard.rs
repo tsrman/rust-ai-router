@@ -149,6 +149,77 @@ pub async fn health_dashboard(
     ))
 }
 
+/// GET /stats — статистика по токенам, командам и эндпоинтам
+pub async fn stats_json(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let requests_total = state.live_stats.requests_total.load(std::sync::atomic::Ordering::Relaxed);
+
+    let tokens: serde_json::Value = state
+        .live_stats
+        .requests_by_token
+        .iter()
+        .map(|entry| {
+            let key = entry.key().clone();
+            let reqs = *entry.value();
+            let errs = state.live_stats.errors_by_token.get(&key).map(|v| *v).unwrap_or(0);
+            (key, json!({
+                "requests": reqs,
+                "errors": errs,
+            }))
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
+
+    let teams: serde_json::Value = state
+        .live_stats
+        .requests_by_team
+        .iter()
+        .map(|entry| {
+            let key = entry.key().clone();
+            let reqs = *entry.value();
+            let errs = state.live_stats.errors_by_team.get(&key).map(|v| *v).unwrap_or(0);
+            (key, json!({
+                "requests": reqs,
+                "errors": errs,
+            }))
+        })
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+        .into();
+
+    let cfg = state.config.load();
+    let endpoints: serde_json::Value = cfg
+        .models
+        .iter()
+        .flat_map(|model| {
+            model.endpoints.iter().map(|ep| {
+                let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
+                let reqs = state.live_stats.requests_by_endpoint.get(&ep_key).map(|v| *v).unwrap_or(0);
+                let errs = state.live_stats.errors_by_endpoint.get(&ep_key).map(|v| *v).unwrap_or(0);
+                let banned = state.limits.fail2ban.is_banned(&ep_key);
+                let health = state.monitoring.health_store.get(&ep_key);
+                let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+                json!({
+                    "model": model.name,
+                    "url": ep.url,
+                    "requests": reqs,
+                    "errors": errs,
+                    "banned": banned,
+                    "healthy": healthy,
+                })
+            })
+        })
+        .collect::<Vec<_>>()
+        .into();
+
+    Json(json!({
+        "requests_total": requests_total,
+        "tokens": tokens,
+        "teams": teams,
+        "endpoints": endpoints,
+    }))
+}
+
 fn mask_key(key: &str) -> String {
     if key.len() <= 8 {
         return "***".into();

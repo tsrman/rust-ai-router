@@ -159,6 +159,7 @@ async fn main() -> anyhow::Result<()> {
             stats: stats_writer,
             health_store,
         },
+        live_stats: Arc::new(proxy::handler::LiveStats::default()),
     });
 
     let prometheus_registry = prometheus::default_registry();
@@ -199,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let health_routes = Router::new()
         .route("/health", get(health::dashboard::health_json))
         .route("/vhealth", get(health::dashboard::health_dashboard))
+        .route("/stats", get(health::dashboard::stats_json))
         .route("/metrics", get(|| async move {
             let encoder = TextEncoder::new();
             let metric_families = prometheus::default_registry().gather();
@@ -212,6 +214,7 @@ async fn main() -> anyhow::Result<()> {
     let mut api_routes = Router::new()
         .route("/health", get(health::dashboard::health_json))
         .route("/vhealth", get(health::dashboard::health_dashboard))
+        .route("/stats", get(health::dashboard::stats_json))
         .route(
             "/metrics",
             get(move || async move {
@@ -281,7 +284,14 @@ async fn list_models(
 
     let auth = match req.extensions().get::<crate::auth::AuthContext>() {
         Some(ctx) => ctx.clone(),
-        None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
+        None => {
+            return crate::utils::json_error(
+                StatusCode::UNAUTHORIZED,
+                "Authentication required. Please provide a valid Bearer token.",
+                "authentication_error",
+                "missing_auth",
+            );
+        }
     };
 
     let cfg = state.config.load();
@@ -290,6 +300,8 @@ async fn list_models(
     if let Some(rl_resp) = proxy::handler::check_all_rate_limits(
         &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
     ).await {
+        tracing::debug!(token = %crate::utils::mask_key(&auth.token_key), "Rate limit hit on /v1/models");
+        state.live_stats.record_error(&auth.token_key, &auth.team, "rate_limited");
         return rl_resp;
     }
 

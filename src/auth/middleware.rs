@@ -3,11 +3,12 @@ use axum::{
     extract::{Request, State},
     http::StatusCode,
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use std::sync::Arc;
 
 use crate::config::AppConfig;
+use crate::utils::json_error;
 
 /// Контекст аутентификации, сохраняемый в request extensions
 #[derive(Debug, Clone)]
@@ -46,7 +47,13 @@ pub async fn auth_middleware(
     let token_key = if let Some(key) = auth_header.strip_prefix("Bearer ") {
         key
     } else {
-        return (StatusCode::UNAUTHORIZED, "Missing Bearer token").into_response();
+        tracing::debug!(path = %path, auth_header = %auth_header, "Missing or malformed Bearer token");
+        return json_error(
+            StatusCode::UNAUTHORIZED,
+            "Missing Bearer token in Authorization header",
+            "authentication_error",
+            "missing_bearer_token",
+        );
     };
 
     match cfg.resolve_token(token_key) {
@@ -57,6 +64,8 @@ pub async fn auth_middleware(
                 .find(|t| t.key == token_key)
                 .map(|t| t.team.clone())
                 .unwrap_or_default();
+
+            tracing::debug!(path = %path, token = %crate::utils::mask_key(token_key), team = %team, "Token authenticated");
 
             let ctx = AuthContext {
                 token_key: token_key.to_string(),
@@ -70,6 +79,14 @@ pub async fn auth_middleware(
             req.extensions_mut().insert(ctx);
             next.run(req).await
         }
-        None => (StatusCode::UNAUTHORIZED, "Invalid token").into_response(),
+        None => {
+            tracing::warn!(path = %path, token = %crate::utils::mask_key(token_key), "Invalid token rejected");
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "Invalid API token provided",
+                "authentication_error",
+                "invalid_api_token",
+            )
+        }
     }
 }

@@ -21,6 +21,7 @@ use crate::metrics::prometheus;
 use crate::ratelimit::{self, RateLimiterStore};
 use crate::router::{ModelRouter, SelectedEndpoint, SessionStickyStore};
 use crate::stats::StatsWriter;
+use crate::utils::json_error;
 
 /// Состояние rate-limiting (локальный governor + sync Redis)
 pub struct RateLimitState {
@@ -41,6 +42,33 @@ pub struct MonitoringState {
     pub health_store: Arc<HealthStore>,
 }
 
+/// Живая статистика по токенам, командам и эндпоинтам
+#[derive(Default)]
+pub struct LiveStats {
+    pub requests_total: std::sync::atomic::AtomicU64,
+    pub requests_by_token: dashmap::DashMap<String, u64>,
+    pub requests_by_team: dashmap::DashMap<String, u64>,
+    pub requests_by_endpoint: dashmap::DashMap<String, u64>,
+    pub errors_by_token: dashmap::DashMap<String, u64>,
+    pub errors_by_team: dashmap::DashMap<String, u64>,
+    pub errors_by_endpoint: dashmap::DashMap<String, u64>,
+}
+
+impl LiveStats {
+    pub fn record_request(&self, token: &str, team: &str, endpoint: &str) {
+        self.requests_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *self.requests_by_token.entry(token.to_string()).or_insert(0) += 1;
+        *self.requests_by_team.entry(team.to_string()).or_insert(0) += 1;
+        *self.requests_by_endpoint.entry(endpoint.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn record_error(&self, token: &str, team: &str, endpoint: &str) {
+        *self.errors_by_token.entry(token.to_string()).or_insert(0) += 1;
+        *self.errors_by_team.entry(team.to_string()).or_insert(0) += 1;
+        *self.errors_by_endpoint.entry(endpoint.to_string()).or_insert(0) += 1;
+    }
+}
+
 /// Общее состояние приложения
 pub struct AppState {
     pub config: Arc<ArcSwap<AppConfig>>,
@@ -49,6 +77,7 @@ pub struct AppState {
     pub limits: RateLimitState,
     pub session: SessionState,
     pub monitoring: MonitoringState,
+    pub live_stats: Arc<LiveStats>,
 }
 
 /// Основной обработчик проксирования /v1/chat/completions etc.
@@ -62,7 +91,15 @@ pub async fn proxy_handler(
     let auth = req.extensions().get::<AuthContext>().cloned();
     let (token_key, team, _cost_multiplier, token_rpm, token_tpm) = match &auth {
         Some(ctx) => (ctx.token_key.clone(), ctx.team.clone(), ctx.cost_multiplier, ctx.rpm, ctx.tpm),
-        None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
+        None => {
+            tracing::debug!(path = %path, "Request rejected: missing authentication context");
+            return json_error(
+                StatusCode::UNAUTHORIZED,
+                "Authentication required. Please provide a valid Bearer token.",
+                "authentication_error",
+                "missing_auth",
+            );
+        }
     };
 
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -125,11 +162,17 @@ pub async fn proxy_handler(
 
     // Проверка доступа
     if !cfg.token_has_model_access(&token_key, &canonical_model) {
+        tracing::warn!(%request_id, token = %mask_key(&token_key), model = %canonical_model, "Forbidden: token has no model access");
+        state.live_stats.record_error(&token_key, &team, "forbidden");
         prometheus::REQUEST_COUNT
             .with_label_values(&[&canonical_model, "auth", "forbidden"])
             .inc();
-        return (StatusCode::FORBIDDEN, format!("Token has no access to model: {model_name}"))
-            .into_response();
+        return json_error(
+            StatusCode::FORBIDDEN,
+            &format!("Token has no access to model: {model_name}"),
+            "access_denied",
+            "model_not_allowed",
+        );
     }
 
     // Собираем список забаненных ключей (один раз для модели, локально + sync)
@@ -148,13 +191,17 @@ pub async fn proxy_handler(
     if model_cfg.as_ref().map_or(false, |m| {
         m.endpoints.len() == banned_keys.len() && m.endpoints.len() > 0
     }) {
+        tracing::warn!(%request_id, model = %canonical_model, "All endpoints banned for model");
+        state.live_stats.record_error(&token_key, &team, "all_banned");
         prometheus::REQUEST_COUNT
             .with_label_values(&[&canonical_model, "router", "all_banned"])
             .inc();
-        return (
+        return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("All endpoints banned for model: {canonical_model}"),
-        ).into_response();
+            &format!("All endpoints banned for model: {canonical_model}"),
+            "service_unavailable",
+            "all_endpoints_banned",
+        );
     }
 
     // Session-sticky routing: проверяем бан (локально + sync)
@@ -202,13 +249,17 @@ pub async fn proxy_handler(
     let mut current_endpoint = match initial_endpoint {
         Some(ep) => ep,
         None => {
+            tracing::warn!(%request_id, model = %canonical_model, "No available endpoint for model");
+            state.live_stats.record_error(&token_key, &team, "no_endpoint");
             prometheus::REQUEST_COUNT
                 .with_label_values(&[&canonical_model, "router", "no_endpoint"])
                 .inc();
-            return (
+            return json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                format!("No available endpoint for model: {canonical_model}"),
-            ).into_response();
+                &format!("No available endpoint for model: {canonical_model}"),
+                "service_unavailable",
+                "no_available_endpoint",
+            );
         }
     };
 
@@ -216,6 +267,8 @@ pub async fn proxy_handler(
     if let Some(rl_resp) = check_all_rate_limits(
         &state, &cfg, &team, &token_key, token_rpm, token_tpm
     ).await {
+        tracing::debug!(%request_id, token = %mask_key(&token_key), team = %team, "Rate limit exceeded");
+        state.live_stats.record_error(&token_key, &team, "rate_limited");
         return rl_resp;
     }
 
@@ -366,6 +419,8 @@ pub async fn proxy_handler(
 
                     // Используем уже прочитанные байты (без клонирования)
 
+                    state.live_stats.record_request(&token_key, &team, &ep_key);
+
                     // Anthropic: перевести ответ OpenAI → Anthropic (до построения ответа)
                     if is_anthropic {
                         if let Ok(openai_json) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes) {
@@ -419,6 +474,7 @@ pub async fn proxy_handler(
                     tried = tried_keys.len() + 1,
                     "Retrying on next endpoint"
                 );
+                state.live_stats.record_error(&token_key, &team, &key_copy);
                 tried_keys.insert(key_copy);
                 last_error_response = Some(upstream_resp);
             }
@@ -426,6 +482,7 @@ pub async fn proxy_handler(
                 let key_copy = ep_key.clone();
                 let just_banned = state.limits.fail2ban.record_failure(&key_copy);
                 tracing::error!(endpoint = %key_copy, error = %e, banned = just_banned, "Upstream network error");
+                state.live_stats.record_error(&token_key, &team, &key_copy);
                 if just_banned {
                     let sync = state.limits.sync.clone();
                     let ep = key_copy.clone();
@@ -438,13 +495,23 @@ pub async fn proxy_handler(
                 if retry_on_failure {
                     tried_keys.insert(key_copy);
                     last_error_response = Some(
-                        (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
+                        json_error(
+                            StatusCode::BAD_GATEWAY,
+                            &format!("Upstream error: {e}"),
+                            "bad_gateway",
+                            "upstream_network_error",
+                        )
                     );
                 } else {
                     prometheus::REQUEST_COUNT
                         .with_label_values(&[&canonical_model, &key_copy, "error"])
                         .inc();
-                    return (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response();
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("Upstream error: {e}"),
+                        "bad_gateway",
+                        "upstream_network_error",
+                    );
                 }
             }
         }
@@ -458,7 +525,12 @@ pub async fn proxy_handler(
                     .with_label_values(&[&canonical_model, "router", "all_failed"])
                     .inc();
                 return last_error_response.unwrap_or_else(|| {
-                    (StatusCode::SERVICE_UNAVAILABLE, "All endpoints failed").into_response()
+                    json_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "All endpoints failed",
+                        "service_unavailable",
+                        "all_endpoints_failed",
+                    )
                 });
             }
         }
@@ -836,7 +908,12 @@ pub async fn proxy_generic(
         // Non-JSON body — для multipart парсим поле model из формы
         let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
             Ok(b) => b.to_vec(),
-            Err(e) => return (StatusCode::BAD_REQUEST, format!("Failed to read body: {e}")).into_response(),
+            Err(e) => return json_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {e}"),
+                "invalid_request_error",
+                "body_read_failed",
+            ),
         };
 
         let model = if content_type.starts_with("multipart/form-data") {
@@ -857,19 +934,34 @@ pub async fn proxy_generic(
 
         match model {
             Some(m) => (bytes, m),
-            None => return (StatusCode::SERVICE_UNAVAILABLE, "No models configured").into_response(),
+            None => return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No models configured",
+                "service_unavailable",
+                "no_models_configured",
+            ),
         }
     };
     let canonical_model = cfg.canonical_model_name(&model_name);
 
     // Check model access
     if !cfg.token_has_model_access(&auth.token_key, &canonical_model) {
-        return (StatusCode::FORBIDDEN, format!("Model '{}' not allowed for this token", canonical_model)).into_response();
+        return json_error(
+            StatusCode::FORBIDDEN,
+            &format!("Model '{}' not allowed for this token", canonical_model),
+            "access_denied",
+            "model_not_allowed",
+        );
     }
 
     // Select endpoint
     let Some(current_endpoint) = state.router.select_endpoint(&canonical_model) else {
-        return (StatusCode::SERVICE_UNAVAILABLE, format!("No endpoint for model: {}", canonical_model)).into_response();
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("No endpoint for model: {}", canonical_model),
+            "service_unavailable",
+            "no_available_endpoint",
+        );
     };
 
     // Build URL: proxy path relative to endpoint base URL
@@ -917,7 +1009,12 @@ pub async fn proxy_generic(
         Err(e) => {
             let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
             state.limits.fail2ban.record_failure(&ep_key);
-            (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
+            json_error(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+                "bad_gateway",
+                "upstream_network_error",
+            )
         }
     }
 }
