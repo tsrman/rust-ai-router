@@ -1,10 +1,11 @@
 use axum::{
-    extract::State,
+    extract::{Extension, State},
     response::{Html, Json},
 };
 use serde_json::json;
 use std::sync::Arc;
 
+use crate::auth::AuthContext;
 use crate::proxy::handler::AppState;
 
 /// GET /health — JSON статус
@@ -149,48 +150,22 @@ pub async fn health_dashboard(
     ))
 }
 
-/// GET /stats — статистика по токенам, командам и эндпоинтам
+/// GET /stats — статистика только по авторизованному токену и его команде
 pub async fn stats_json(
     State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
 ) -> Json<serde_json::Value> {
-    let requests_total = state.live_stats.requests_total.load(std::sync::atomic::Ordering::Relaxed);
+    let token_reqs = state.live_stats.requests_by_token.get(&auth.token_key).map(|v| *v).unwrap_or(0);
+    let token_errs = state.live_stats.errors_by_token.get(&auth.token_key).map(|v| *v).unwrap_or(0);
 
-    let tokens: serde_json::Value = state
-        .live_stats
-        .requests_by_token
-        .iter()
-        .map(|entry| {
-            let key = entry.key().clone();
-            let reqs = *entry.value();
-            let errs = state.live_stats.errors_by_token.get(&key).map(|v| *v).unwrap_or(0);
-            (key, json!({
-                "requests": reqs,
-                "errors": errs,
-            }))
-        })
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
-
-    let teams: serde_json::Value = state
-        .live_stats
-        .requests_by_team
-        .iter()
-        .map(|entry| {
-            let key = entry.key().clone();
-            let reqs = *entry.value();
-            let errs = state.live_stats.errors_by_team.get(&key).map(|v| *v).unwrap_or(0);
-            (key, json!({
-                "requests": reqs,
-                "errors": errs,
-            }))
-        })
-        .collect::<serde_json::Map<String, serde_json::Value>>()
-        .into();
+    let team_reqs = state.live_stats.requests_by_team.get(&auth.team).map(|v| *v).unwrap_or(0);
+    let team_errs = state.live_stats.errors_by_team.get(&auth.team).map(|v| *v).unwrap_or(0);
 
     let cfg = state.config.load();
-    let endpoints: serde_json::Value = cfg
+    let endpoints: Vec<serde_json::Value> = cfg
         .models
         .iter()
+        .filter(|m| cfg.token_has_model_access(&auth.token_key, &m.name))
         .flat_map(|model| {
             model.endpoints.iter().map(|ep| {
                 let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
@@ -209,13 +184,15 @@ pub async fn stats_json(
                 })
             })
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
 
     Json(json!({
-        "requests_total": requests_total,
-        "tokens": tokens,
-        "teams": teams,
+        "token_key": auth.token_key,
+        "team": auth.team,
+        "token_requests": token_reqs,
+        "token_errors": token_errs,
+        "team_requests": team_reqs,
+        "team_errors": team_errs,
         "endpoints": endpoints,
     }))
 }
