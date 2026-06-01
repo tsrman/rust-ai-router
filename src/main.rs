@@ -200,7 +200,6 @@ async fn main() -> anyhow::Result<()> {
     let health_routes = Router::new()
         .route("/health", get(health::dashboard::health_json))
         .route("/vhealth", get(health::dashboard::health_dashboard))
-        .route("/stats", get(health::dashboard::stats_json))
         .route("/metrics", get(|| async move {
             let encoder = TextEncoder::new();
             let metric_families = prometheus::default_registry().gather();
