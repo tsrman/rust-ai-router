@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         let bp = base_path.trim_start_matches('/');
         tracing::info!(addr = %listen_addr, base_path = %bp, "Listening (root + nested)");
-        health_routes.merge(api_routes.clone().nest(&format!("/{bp}"), api_routes))
+        health_routes.nest(&format!("/{bp}"), api_routes)
     };
 
     tracing::info!("Server ready, accepting connections");
