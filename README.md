@@ -417,6 +417,7 @@ LIMIT 20;
 | `GET` | `/health` | No | JSON health status of all endpoints |
 | `GET` | `/vhealth` | No | HTML health dashboard with auto-refresh |
 | `GET` | `/metrics` | No | Prometheus metrics (text format) |
+| `GET` | `/stats` | Yes | Live request statistics per token/team/endpoint |
 | `GET` | `/v1/models` | Yes | List available models (OpenAI-compatible) |
 | `POST` | `/v1/chat/completions` | Yes | Chat completions (proxied) |
 | `POST` | `/v1/messages` | Yes | Anthropic Messages API (translated to OpenAI, proxied, translated back) |
@@ -435,9 +436,82 @@ The router adds these headers to proxied responses:
 | `x-cost-prompt-per-1m` | Prompt token cost per 1M (if configured) |
 | `x-cost-completion-per-1m` | Completion token cost per 1M (if configured) |
 
+### Error Responses
+
+All errors are returned in OpenAI-compatible JSON format:
+
+```json
+{
+  "error": {
+    "message": "Invalid API token provided",
+    "type": "authentication_error",
+    "param": null,
+    "code": "invalid_api_token"
+  }
+}
+```
+
+Common error codes:
+
+| HTTP Status | `code` | When |
+|-------------|--------|------|
+| `401` | `missing_bearer_token` | No `Authorization: Bearer ...` header |
+| `401` | `invalid_api_token` | Unknown token |
+| `403` | `model_not_allowed` | Token has no access to requested model |
+| `429` | `rate_limit_exceeded` | Team or token RPM/TPM limit hit |
+| `503` | `all_endpoints_banned` | Every endpoint for the model is banned |
+| `503` | `no_available_endpoint` | No healthy endpoint for the model |
+| `502` | `upstream_network_error` | Network error from upstream |
+
 ### Rate Limit Headers
 
 Standard HTTP 429 is returned when limits are exceeded. Response body indicates the scope (token, team, or endpoint).
+
+## Live Statistics
+
+`GET /stats` returns real-time request statistics. Regular tokens see only their own scope; **admin tokens** (`models: ["*"]`) see aggregated data for **all tokens and teams**.
+
+```bash
+curl -H "Authorization: Bearer sk-admin-xxx" http://localhost:8080/stats
+```
+
+**Regular token response:**
+```json
+{
+  "token_key": "sk-basic",
+  "team": "basic",
+  "is_admin": false,
+  "token_requests": 42,
+  "token_errors": 3,
+  "team_requests": 150,
+  "team_errors": 10,
+  "endpoints": [
+    {
+      "model": "gpt-4o-mini",
+      "url": "https://api.openai.com",
+      "requests": 25,
+      "errors": 2,
+      "banned": false,
+      "healthy": true
+    }
+  ]
+}
+```
+
+**Admin token response** additionally includes:
+```json
+{
+  "is_admin": true,
+  "all_tokens": {
+    "sk-admin": { "requests": 100, "errors": 5 },
+    "sk-basic": { "requests": 42, "errors": 3 }
+  },
+  "all_teams": {
+    "admin": { "requests": 100, "errors": 5 },
+    "basic": { "requests": 42, "errors": 3 }
+  }
+}
+```
 
 ## Prometheus Metrics
 
@@ -714,6 +788,25 @@ api.example.com {
 
 > **Caddy automatically obtains TLS certificates** from Let's Encrypt. Just replace `api.example.com` with your actual domain. For local development use `tls internal`.
 
+## Logging & Debugging
+
+The router uses `tracing` for structured logging. Set the log level via the `RUST_LOG` environment variable:
+
+```bash
+RUST_LOG=debug ./openai-router config.yaml
+```
+
+**What gets logged:**
+
+| Level | What is logged |
+|-------|----------------|
+| `INFO` | Startup, config reload, requests (method, path, token, latency) |
+| `WARN` | Invalid tokens, forbidden model access, upstream errors, endpoint bans |
+| `DEBUG` | Missing/malformed Bearer tokens, rate-limit hits, endpoint selection, retries |
+| `ERROR` | Upstream network failures, PostgreSQL connection issues |
+
+All rejected requests (invalid token, rate limit, missing auth) are logged with enough detail to debug access issues without exposing full keys (tokens are masked as `sk-ab...cd`).
+
 ## Building from Source
 
 Requirements:
@@ -801,13 +894,14 @@ src/
 ├── metrics/
 │   └── prometheus.rs       # Prometheus metric definitions
 ├── health/
-│   ├── dashboard.rs        # /health JSON + /vhealth HTML
+│   ├── dashboard.rs        # /health JSON + /vhealth HTML + /stats live statistics
 │   └── checker.rs          # Background endpoint health probes
-└── stats/
-    └── pg.rs               # PostgreSQL: requests + token/team hourly aggregation
+├── stats/
+│   └── pg.rs               # PostgreSQL: requests + token/team hourly aggregation
 ├── sync/
 │   ├── mod.rs              # SyncStore (no-op or Redis-backed)
 │   └── redis_sync.rs       # Redis/Valkey: rate limits, bans, sticky sessions
+└── utils.rs                # Shared helpers (mask_key, mask_url, json_error)
 ```
 
 ## License
