@@ -150,11 +150,13 @@ pub async fn health_dashboard(
     ))
 }
 
-/// GET /stats — статистика только по авторизованному токену и его команде
+/// GET /stats — статистика по токену/команде (admin видит всё)
 pub async fn stats_json(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Json<serde_json::Value> {
+    let is_admin = auth.models.iter().any(|m| m == "*");
+
     let token_reqs = state.live_stats.requests_by_token.get(&auth.token_key).map(|v| *v).unwrap_or(0);
     let token_errs = state.live_stats.errors_by_token.get(&auth.token_key).map(|v| *v).unwrap_or(0);
 
@@ -162,11 +164,8 @@ pub async fn stats_json(
     let team_errs = state.live_stats.errors_by_team.get(&auth.team).map(|v| *v).unwrap_or(0);
 
     let cfg = state.config.load();
-    let endpoints: Vec<serde_json::Value> = cfg
-        .models
-        .iter()
-        .filter(|m| cfg.token_has_model_access(&auth.token_key, &m.name))
-        .flat_map(|model| {
+    let endpoints: Vec<serde_json::Value> = if is_admin {
+        cfg.models.iter().flat_map(|model| {
             model.endpoints.iter().map(|ep| {
                 let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
                 let reqs = state.live_stats.requests_by_endpoint.get(&ep_key).map(|v| *v).unwrap_or(0);
@@ -183,18 +182,73 @@ pub async fn stats_json(
                     "healthy": healthy,
                 })
             })
-        })
-        .collect();
+        }).collect()
+    } else {
+        cfg.models
+            .iter()
+            .filter(|m| cfg.token_has_model_access(&auth.token_key, &m.name))
+            .flat_map(|model| {
+                model.endpoints.iter().map(|ep| {
+                    let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
+                    let reqs = state.live_stats.requests_by_endpoint.get(&ep_key).map(|v| *v).unwrap_or(0);
+                    let errs = state.live_stats.errors_by_endpoint.get(&ep_key).map(|v| *v).unwrap_or(0);
+                    let banned = state.limits.fail2ban.is_banned(&ep_key);
+                    let health = state.monitoring.health_store.get(&ep_key);
+                    let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+                    json!({
+                        "model": model.name,
+                        "url": ep.url,
+                        "requests": reqs,
+                        "errors": errs,
+                        "banned": banned,
+                        "healthy": healthy,
+                    })
+                })
+            })
+            .collect()
+    };
 
-    Json(json!({
+    let mut resp = json!({
         "token_key": auth.token_key,
         "team": auth.team,
+        "is_admin": is_admin,
         "token_requests": token_reqs,
         "token_errors": token_errs,
         "team_requests": team_reqs,
         "team_errors": team_errs,
         "endpoints": endpoints,
-    }))
+    });
+
+    if is_admin {
+        let all_tokens: serde_json::Map<String, serde_json::Value> = state
+            .live_stats
+            .requests_by_token
+            .iter()
+            .map(|entry| {
+                let key = entry.key().clone();
+                let reqs = *entry.value();
+                let errs = state.live_stats.errors_by_token.get(&key).map(|v| *v).unwrap_or(0);
+                (key, json!({ "requests": reqs, "errors": errs }))
+            })
+            .collect();
+
+        let all_teams: serde_json::Map<String, serde_json::Value> = state
+            .live_stats
+            .requests_by_team
+            .iter()
+            .map(|entry| {
+                let key = entry.key().clone();
+                let reqs = *entry.value();
+                let errs = state.live_stats.errors_by_team.get(&key).map(|v| *v).unwrap_or(0);
+                (key, json!({ "requests": reqs, "errors": errs }))
+            })
+            .collect();
+
+        resp["all_tokens"] = all_tokens.into();
+        resp["all_teams"] = all_teams.into();
+    }
+
+    Json(resp)
 }
 
 fn mask_key(key: &str) -> String {
