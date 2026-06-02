@@ -434,11 +434,8 @@ pub async fn proxy_handler(
                         }
                     }
 
-                    // Строим ответ с заголовками
-                    resp = axum::response::Response::builder()
-                        .status(upstream_status)
-                        .body(axum::body::Body::from(resp_body_bytes))
-                        .unwrap_or(resp);
+                    // Восстанавливаем тело, сохраняя все заголовки от upstream
+                    *resp.body_mut() = axum::body::Body::from(resp_body_bytes);
 
                     let headers = resp.headers_mut();
                     insert_header(headers, "x-endpoint-used", &current_endpoint.url);
@@ -1034,12 +1031,21 @@ async fn proxy_raw(
         .await?;
 
     let status = resp.status();
-    let _headers = resp.headers().clone();
+    let upstream_headers = resp.headers().clone();
     let body_bytes = resp.bytes().await?;
 
-    Ok(Response::builder()
-        .status(status)
-        .body(Body::from(body_bytes))?)
+    let mut response = Response::builder().status(status);
+    if let Some(hdr) = response.headers_mut() {
+        for (key, val) in upstream_headers.iter() {
+            if key != "transfer-encoding" && key != "content-encoding" {
+                if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    hdr.insert(name, val.clone());
+                }
+            }
+        }
+    }
+
+    Ok(response.body(Body::from(body_bytes))?)
 }
 
 /// Определить тип модели по пути запроса
