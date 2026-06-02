@@ -175,6 +175,23 @@ Rate limit order: **team shared budget → token personal limit**
 | Team | `team:<name>` | All tokens in the team share one counter |
 | Token | `<token_key>` | Per-token limit (inherits from team if not set) |
 
+#### Rate Limiting Algorithm
+
+**RPM** (requests per minute) uses a classic token bucket: every request consumes exactly **1** token. If the bucket is empty, the request is rejected with `429`.
+
+**TPM** (tokens per minute) uses a **two-phase** design to account for the fact that the real token count is only known after the upstream responds:
+
+1. **Pre-flight check** — when the request arrives, the router reserves **1** token from the TPM bucket. This is a minimal reservation that almost always passes.
+2. **Post-fact consumption** — after the upstream responds, the router parses `usage.prompt_tokens` + `usage.completion_tokens` (or `input_tokens` / `output_tokens`) and consumes the **remaining** tokens (`total - 1`) from the same bucket.
+
+This means:
+- The router never blocks a request based on an *estimate* of token usage.
+- If a request turns out to be huge (e.g. 50 000 tokens), the full 50 000 is deducted from the budget, and subsequent requests may be rate-limited until the bucket refills.
+- The bucket can go into **overdraft** (negative balance). In that case, the next request is blocked until enough time passes for the bucket to recover.
+- The refill rate is linear: `capacity * elapsed_seconds / 60`.
+
+**Endpoint-level TPM** works the same way: each backend credential has its own bucket, and the actual token usage is deducted after the response is received.
+
 ### Tokens
 
 Tokens are API keys that clients use. Each token belongs to a team and inherits its settings by default.

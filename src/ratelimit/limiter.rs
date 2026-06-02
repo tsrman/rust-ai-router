@@ -287,6 +287,96 @@ mod tests {
         // Следующий запрос сразу блокируется, пока бакет не пополнится
         assert!(!store.check("tpm-od", 0, 5, 1, RateLimitScope::Token).allowed);
     }
+
+    #[test]
+    fn test_tpm_consume_zero_is_noop() {
+        let store = RateLimiterStore::new();
+        assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+        store.consume_tpm("tpm-zero", 5, 0);
+        // Бюджет не изменился (осталось 4)
+        assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+        assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+        assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+        assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+        // 5-й запрос — блок
+        assert!(!store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_tpm_consume_isolated_per_key() {
+        let store = RateLimiterStore::new();
+        // key1: check 1 + consume 5 = 6 из 10
+        assert!(store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
+        store.consume_tpm("key1", 10, 5);
+        // key2: независимый бюджет 10
+        assert!(store.check("key2", 0, 10, 1, RateLimitScope::Token).allowed);
+        store.consume_tpm("key2", 10, 5);
+        // key1 осталось 4 — 4 проходят
+        for _ in 0..4 {
+            assert!(store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
+        }
+        assert!(!store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
+        // key2 тоже осталось 4
+        for _ in 0..4 {
+            assert!(store.check("key2", 0, 10, 1, RateLimitScope::Token).allowed);
+        }
+        assert!(!store.check("key2", 0, 10, 1, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_rpm_plus_tpm_with_consume() {
+        let store = RateLimiterStore::new();
+        // RPM=2, TPM=10. Первый запрос проходит.
+        assert!(store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
+        // Пост-факт consume 5 → TPM осталось 4
+        store.consume_tpm("mixed", 10, 5);
+        // Второй запрос проходит по RPM и TPM
+        assert!(store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
+        // consume ещё 3 → TPM осталось 1 (10 - 1 - 5 - 1 - 3 = 0)
+        store.consume_tpm("mixed", 10, 3);
+        // RPM исчерпан (2/2), TPM тоже 0 — блок
+        assert!(!store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_cleanup_retains_recently_used() {
+        use std::sync::atomic::Ordering;
+        let store = RateLimiterStore::new();
+        let pair = store.get_or_create("recent", 1, 10);
+        pair.touch();
+        // last_used должен быть свежим (в пределах пары секунд от now)
+        let now = unix_now();
+        let last = pair.last_used.load(Ordering::Relaxed);
+        assert!(now >= last && now - last < 5, "last_used should be recent");
+    }
+
+    #[test]
+    fn test_tpm_large_consume_blocks_subsequent() {
+        let store = RateLimiterStore::new();
+        // TPM=100. check(1) → осталось 99
+        assert!(store.check("bulk", 0, 100, 1, RateLimitScope::Token).allowed);
+        // consume 99 → осталось 0
+        store.consume_tpm("bulk", 100, 99);
+        // Следующий check(1) блокируется
+        assert!(!store.check("bulk", 0, 100, 1, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_tpm_check_n_with_estimated_greater_than_one() {
+        let store = RateLimiterStore::new();
+        // TPM=10, estimated_tokens=4 → проходит (осталось 6)
+        assert!(store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
+        // estimated_tokens=4 → проходит (осталось 2)
+        assert!(store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
+        // estimated_tokens=4 → блок (нужно 4, осталось 2)
+        assert!(!store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
+        // consume не меняет ключ
+        store.consume_tpm("est", 10, 1);
+        // estimated_tokens=1 → проходит (осталось 1)
+        assert!(store.check("est", 0, 10, 1, RateLimitScope::Token).allowed);
+        // Больше ничего
+        assert!(!store.check("est", 0, 10, 1, RateLimitScope::Token).allowed);
+    }
 }
 
 impl RateLimiterStore {
