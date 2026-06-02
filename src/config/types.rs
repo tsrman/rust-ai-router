@@ -291,8 +291,21 @@ pub struct EffectiveLimits {
 pub struct SyncConfig {
     #[serde(default)]
     pub enabled: bool,
+    /// Режим подключения: "standalone" (по умолчанию) или "sentinel"
+    #[serde(default = "default_sync_mode")]
+    pub mode: String,
+    /// URL для standalone режима (обратная совместимость)
     #[serde(default)]
     pub redis_url: Option<String>,
+    /// Список Sentinel-нод для режима sentinel
+    #[serde(default)]
+    pub sentinel_nodes: Vec<String>,
+    /// Имя мастера в Sentinel
+    #[serde(default)]
+    pub sentinel_master_name: Option<String>,
+    /// Тип сервера: "master" (по умолчанию) или "replica"
+    #[serde(default = "default_sentinel_server_type")]
+    pub sentinel_server_type: String,
     #[serde(default = "default_sync_prefix")]
     pub key_prefix: String,
     /// Если Redis недоступен: true = пропускать запросы без лимитов, false = отклонять
@@ -302,15 +315,21 @@ pub struct SyncConfig {
 
 fn default_true() -> bool { true }
 
-fn default_sync_prefix() -> String {
-    "oar".into()
-}
+fn default_sync_mode() -> String { "standalone".into() }
+
+fn default_sync_prefix() -> String { "oar".into() }
+
+fn default_sentinel_server_type() -> String { "master".into() }
 
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: "standalone".into(),
             redis_url: None,
+            sentinel_nodes: Vec::new(),
+            sentinel_master_name: None,
+            sentinel_server_type: "master".into(),
             key_prefix: "oar".into(),
             fail_open: true,
         }

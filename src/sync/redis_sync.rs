@@ -18,8 +18,17 @@ impl SyncStore {
         Self { conn: None, prefix: String::new() }
     }
 
-    /// Подключиться к Redis/Valkey
-    pub async fn connect(url: &str, prefix: &str) -> Result<Self, String> {
+    /// Подключиться к Redis/Valkey (standalone или sentinel)
+    pub async fn connect(cfg: &crate::config::SyncConfig) -> Result<Self, String> {
+        if cfg.mode == "sentinel" || !cfg.sentinel_nodes.is_empty() {
+            Self::connect_sentinel(cfg).await
+        } else {
+            let url = cfg.redis_url.as_deref().unwrap_or("redis://localhost:6379");
+            Self::connect_standalone(url, &cfg.key_prefix).await
+        }
+    }
+
+    async fn connect_standalone(url: &str, prefix: &str) -> Result<Self, String> {
         let client = redis::Client::open(url)
             .map_err(|e| format!("Redis client error: {e}"))?;
 
@@ -33,8 +42,46 @@ impl SyncStore {
             .await
             .map_err(|e| format!("Redis PING failed: {e}"))?;
 
-        tracing::info!(url = %crate::utils::mask_url(url), prefix, "Redis sync connected");
+        tracing::info!(url = %crate::utils::mask_url(url), prefix, "Redis sync connected (standalone)");
         Ok(Self { conn: Some(conn), prefix: prefix.to_string() })
+    }
+
+    async fn connect_sentinel(cfg: &crate::config::SyncConfig) -> Result<Self, String> {
+        let nodes = cfg.sentinel_nodes.clone();
+        if nodes.is_empty() {
+            return Err("Sentinel mode enabled but sentinel_nodes is empty".into());
+        }
+        let master_name = cfg.sentinel_master_name.clone()
+            .unwrap_or_else(|| "mymaster".into());
+        let server_type = match cfg.sentinel_server_type.as_str() {
+            "replica" => redis::sentinel::SentinelServerType::Replica,
+            _ => redis::sentinel::SentinelServerType::Master,
+        };
+
+        let mut sentinel_client = redis::sentinel::SentinelClient::build(
+            nodes.clone(),
+            master_name.clone(),
+            None,
+            server_type,
+        ).map_err(|e| format!("Sentinel client build failed: {e}"))?;
+
+        let mut conn = sentinel_client
+            .get_async_connection()
+            .await
+            .map_err(|e| format!("Sentinel connection failed: {e}"))?;
+
+        let _: String = redis::cmd("PING")
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| format!("Sentinel PING failed: {e}"))?;
+
+        tracing::info!(
+            nodes = ?nodes,
+            master = %master_name,
+            prefix = %cfg.key_prefix,
+            "Redis sync connected (sentinel)"
+        );
+        Ok(Self { conn: Some(conn), prefix: cfg.key_prefix.clone() })
     }
 
     fn conn(&self) -> Option<MultiplexedConnection> {
@@ -51,8 +98,6 @@ impl SyncStore {
             return RateLimitResult { allowed: true, limit: 0, reset_after_secs: 0.0, scope: RateLimitScope::Token };
         }
 
-        // Скользящее окно: ключ без привязки к минуте.
-        // INCR при первом запросе → EXPIRE 60s. Сброс через 60s после первого запроса.
         let rk = format!("{}:rl:{}:{}", self.prefix, scope, key);
         let window_secs: i64 = 60;
 

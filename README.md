@@ -693,12 +693,31 @@ When running multiple instances behind a load balancer, enable Redis/Valkey sync
 
 ### Configuration
 
+#### Standalone Redis/Valkey
+
 ```yaml
 sync:
   enabled: true
+  mode: "standalone"
   redis_url: "redis://valkey:6379/0"
   key_prefix: "oar"
   fail_open: true               # If Redis is down: true=allow without limits, false=reject
+```
+
+#### Redis Sentinel (HA)
+
+```yaml
+sync:
+  enabled: true
+  mode: "sentinel"
+  sentinel_nodes:
+    - "redis://sentinel-1:26379"
+    - "redis://sentinel-2:26379"
+    - "redis://sentinel-3:26379"
+  sentinel_master_name: "mymaster"
+  sentinel_server_type: "master"   # "master" or "replica"
+  key_prefix: "oar"
+  fail_open: true
 ```
 
 `fail_open` determines behavior when Redis/Valkey is unreachable:

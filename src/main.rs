@@ -114,10 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Sync (Redis/Valkey) ───────────────────────────────────────────
     let sync_store = if cfg.sync.enabled {
-        match crate::sync::SyncStore::connect(
-            cfg.sync.redis_url.as_deref().unwrap_or("redis://localhost:6379"),
-            &cfg.sync.key_prefix,
-        ).await {
+        match crate::sync::SyncStore::connect(&cfg.sync).await {
             Ok(store) => {
                 crate::metrics::prometheus::REDIS_CONNECTED.set(1);
                 tracing::info!("Sync connected to Redis/Valkey");

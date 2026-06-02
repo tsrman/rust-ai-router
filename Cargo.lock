@@ -1742,6 +1742,7 @@ dependencies = [
  "itoa",
  "percent-encoding",
  "pin-project-lite",
+ "rand 0.8.6",
  "rustls 0.22.4",
  "ryu",
  "tokio",
