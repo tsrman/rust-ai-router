@@ -80,6 +80,36 @@ pub struct AppState {
     pub live_stats: Arc<LiveStats>,
 }
 
+/// Нормализовать JSON-ответ от upstream к строгому OpenAI-формату.
+/// Удаляет нестандартные поля (vLLM-расширения) и заменяет model на запрошенное имя.
+fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &str) {
+    if let Some(obj) = value.as_object_mut() {
+        // Заменяем model на запрошенное имя (как делает LiteLLM)
+        obj.insert("model".to_string(), serde_json::Value::String(requested_model.to_string()));
+
+        // Удаляем нестандартные поля на корневом уровне
+        for key in &["prompt_logprobs", "prompt_token_ids", "kv_transfer_params"] {
+            obj.remove(*key);
+        }
+
+        // Нормализуем choices
+        if let Some(choices) = obj.get_mut("choices").and_then(|v| v.as_array_mut()) {
+            for choice in choices.iter_mut() {
+                if let Some(choice_obj) = choice.as_object_mut() {
+                    // Удаляем нестандартные поля choice
+                    for key in &["stop_reason", "token_ids", "provider_specific_fields"] {
+                        choice_obj.remove(*key);
+                    }
+                    // Удаляем нестандартные поля внутри message
+                    if let Some(msg) = choice_obj.get_mut("message").and_then(|v| v.as_object_mut()) {
+                        msg.remove("provider_specific_fields");
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Основной обработчик проксирования /v1/chat/completions etc.
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
@@ -392,9 +422,11 @@ pub async fn proxy_handler(
                         1024 * 1024,
                     ).await.unwrap_or_default();
 
-                    // Извлекаем usage из ответа (поддержка Chat Completions + Responses API)
-                    let (tokens_prompt, tokens_completion) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes)
-                        .ok()
+                    // Парсим JSON-ответ для нормализации и извлечения usage
+                    let mut upstream_json = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes).ok();
+
+                    let (tokens_prompt, tokens_completion) = upstream_json
+                        .as_ref()
                         .and_then(|v| {
                             let usage = v.get("usage")?;
                             let prompt = usage.get("prompt_tokens")
@@ -409,6 +441,11 @@ pub async fn proxy_handler(
                         })
                         .unwrap_or((0, 0));
 
+                    // Нормализуем ответ к строгому OpenAI-формату (как LiteLLM)
+                    if let Some(ref mut json) = upstream_json {
+                        normalize_openai_response(json, &model_name);
+                    }
+
                     // Хеш токена для статистики
                     let token_hash = {
                         use std::hash::Hasher;
@@ -417,13 +454,11 @@ pub async fn proxy_handler(
                         format!("{:x}", h.finish())
                     };
 
-                    // Используем уже прочитанные байты (без клонирования)
-
                     state.live_stats.record_request(&token_key, &team, &ep_key);
 
                     // Anthropic: перевести ответ OpenAI → Anthropic (до построения ответа)
                     if is_anthropic {
-                        if let Ok(openai_json) = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes) {
+                        if let Some(ref openai_json) = upstream_json {
                             let anthropic_json = crate::proxy::anthropic::translate_response(&openai_json);
                             let new_body = serde_json::to_vec(&anthropic_json).unwrap_or_default();
                             return axum::response::Response::builder()
@@ -434,7 +469,10 @@ pub async fn proxy_handler(
                         }
                     }
 
-                    // Восстанавливаем тело, сохраняя все заголовки от upstream
+                    // Восстанавливаем тело (нормализованное JSON или оригинальные байты)
+                    let resp_body_bytes = upstream_json
+                        .and_then(|j| serde_json::to_vec(&j).ok())
+                        .unwrap_or_else(|| resp_body_bytes.to_vec());
                     *resp.body_mut() = axum::body::Body::from(resp_body_bytes);
 
                     let headers = resp.headers_mut();
@@ -855,6 +893,49 @@ mod tests {
         assert_eq!(headers.get("x-ratelimit-limit-requests").unwrap(), "10");
         assert_eq!(headers.get("x-ratelimit-remaining-requests").unwrap(), "0");
         assert!(headers.get("x-ratelimit-reset-requests").unwrap().to_str().unwrap().starts_with("30."));
+    }
+
+    #[test]
+    fn test_normalize_openai_response() {
+        let raw = r#"{
+            "id":"chatcmpl-test",
+            "object":"chat.completion",
+            "model":"qwencoder",
+            "choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":"hi","refusal":null},
+                "finish_reason":"stop",
+                "stop_reason":null,
+                "token_ids":[1,2,3],
+                "provider_specific_fields":{}
+            }],
+            "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},
+            "prompt_logprobs":null,
+            "kv_transfer_params":{},
+            "service_tier":null
+        }"#;
+        let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
+        normalize_openai_response(&mut json, "coder36");
+
+        // model должен быть заменён на запрошенное имя
+        assert_eq!(json["model"], "coder36");
+
+        // нестандартные поля на корне удалены
+        assert!(json.get("prompt_logprobs").is_none());
+        assert!(json.get("kv_transfer_params").is_none());
+        assert!(json.get("prompt_token_ids").is_none());
+
+        // нестандартные поля в choice удалены
+        let choice = &json["choices"][0];
+        assert!(choice.get("stop_reason").is_none());
+        assert!(choice.get("token_ids").is_none());
+        assert!(choice.get("provider_specific_fields").is_none());
+        assert!(choice["message"].get("provider_specific_fields").is_none());
+
+        // стандартные поля сохранены
+        assert_eq!(choice["finish_reason"], "stop");
+        assert_eq!(choice["message"]["content"], "hi");
+        assert_eq!(json["usage"]["total_tokens"], 15);
     }
 }
 

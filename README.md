@@ -438,6 +438,22 @@ The router adds these headers to proxied responses:
 | `x-cost-prompt-per-1m` | Prompt token cost per 1M (if configured) |
 | `x-cost-completion-per-1m` | Completion token cost per 1M (if configured) |
 
+### Response Normalization
+
+The router normalizes upstream responses to the strict OpenAI schema, removing non-standard extensions injected by inference engines (vLLM, TGI, etc.). This ensures compatibility with strict clients such as **Hermes agent**, **LangChain**, and **OpenAI Python SDK**.
+
+What is normalized:
+
+| Transformation | Why |
+|----------------|-----|
+| `model` field replaced with **requested model name** | Upstream may return internal model IDs (`qwencoder`) while the client expects the alias (`coder36`) |
+| `choices[].stop_reason` removed | Non-standard vLLM field; breaks Pydantic validators |
+| `choices[].token_ids` removed | Non-standard vLLM field |
+| `choices[].provider_specific_fields` removed | Non-standard wrapper field |
+| `prompt_logprobs`, `prompt_token_ids`, `kv_transfer_params` removed | Non-standard root-level fields |
+
+LiteLLM performs the same sanitization; the router now matches that behavior out of the box.
+
 ### Error Responses
 
 All errors are returned in OpenAI-compatible JSON format:
