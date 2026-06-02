@@ -1,8 +1,11 @@
 use dashmap::DashMap;
 use governor::clock::Clock;
 use governor::{Quota, RateLimiter as GovernorLimiter};
+use parking_lot::Mutex;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Результат проверки rate limit
 #[derive(Debug, Clone)]
@@ -24,10 +27,106 @@ pub enum RateLimitScope {
     Endpoint,
 }
 
+/// Кастомный token-bucket для TPM с поддержкой пост-фактного списания.
+struct TpmLimiter {
+    capacity: u64,
+    state: Mutex<TpmState>,
+}
+
+struct TpmState {
+    tokens: i64,
+    last_update: Instant,
+}
+
+impl TpmLimiter {
+    fn new(capacity: u64) -> Self {
+        let cap = capacity.max(1) as i64;
+        Self {
+            capacity,
+            state: Mutex::new(TpmState {
+                tokens: cap,
+                last_update: Instant::now(),
+            }),
+        }
+    }
+
+    /// Пополнить бакет пропорционально прошедшему времени (1 minute window).
+    fn refill(state: &mut TpmState, capacity: u64) {
+        let now = Instant::now();
+        let elapsed_ms = now.duration_since(state.last_update).as_millis() as u64;
+        if elapsed_ms > 0 {
+            let add = (elapsed_ms as u128 * capacity as u128 / 60_000) as i64;
+            if add > 0 {
+                state.tokens = (state.tokens + add).min(capacity as i64);
+                state.last_update = now;
+            }
+        }
+    }
+
+    /// Проверить и атомарно списать n токенов.
+    fn check_n(&self, n: u64) -> Result<(), RateLimitWait> {
+        let mut s = self.state.lock();
+        Self::refill(&mut s, self.capacity);
+        let n_i64 = n as i64;
+        if s.tokens >= n_i64 {
+            s.tokens -= n_i64;
+            Ok(())
+        } else {
+            let deficit = n_i64 - s.tokens;
+            let wait_secs = if self.capacity > 0 {
+                deficit as f64 * 60.0 / self.capacity as f64
+            } else {
+                60.0
+            };
+            Err(RateLimitWait { wait_secs })
+        }
+    }
+
+    /// Пост-фактное списание: пополняем бакет и принудительно уменьшаем на n.
+    /// Баланс может уйти в минус — следующие запросы будут заблокированы до пополнения.
+    fn consume_n(&self, n: u64) {
+        let mut s = self.state.lock();
+        Self::refill(&mut s, self.capacity);
+        s.tokens -= n as i64;
+    }
+}
+
+struct RateLimitWait {
+    wait_secs: f64,
+}
+
 /// Два rate limiter'а: RPM и TPM
 struct RateLimitPair {
     rpm: GovernorLimiter<String, dashmap::DashMap<String, governor::state::InMemoryState>, governor::clock::DefaultClock, governor::middleware::NoOpMiddleware>,
-    tpm: GovernorLimiter<String, dashmap::DashMap<String, governor::state::InMemoryState>, governor::clock::DefaultClock, governor::middleware::NoOpMiddleware>,
+    tpm: TpmLimiter,
+    last_used: AtomicU64,
+}
+
+impl RateLimitPair {
+    fn new(rpm: u32, tpm: u64) -> Self {
+        let rpm_q = if rpm > 0 {
+            Quota::per_minute(NonZeroU32::new(rpm).unwrap_or(NonZeroU32::MIN))
+        } else {
+            Quota::per_minute(NonZeroU32::new(1).unwrap())
+        };
+
+        Self {
+            rpm: GovernorLimiter::keyed(rpm_q),
+            tpm: TpmLimiter::new(tpm),
+            last_used: AtomicU64::new(unix_now()),
+        }
+    }
+
+    fn touch(&self) {
+        self.last_used.store(unix_now(), Ordering::Relaxed);
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 /// Хранилище rate limiter'ов по ключам
@@ -54,6 +153,7 @@ impl RateLimiterStore {
         // RPM проверка
         if rpm > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
+            pair.touch();
             match pair.rpm.check_key(&key.to_string()) {
                 Err(not_until) => {
                     let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());
@@ -71,27 +171,18 @@ impl RateLimiterStore {
         // TPM проверка (атомарно — check_key_n для N токенов)
         if tpm > 0 && estimated_tokens > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
-            let n = NonZeroU32::new(estimated_tokens as u32).unwrap_or(NonZeroU32::MIN);
-            match pair.tpm.check_key_n(&key.to_string(), n) {
-                Err(_insufficient) => {
-                    // Запрос с estimated_tokens > capacity бакета — всегда отклоняем
+            pair.touch();
+            let n = estimated_tokens;
+            match pair.tpm.check_n(n) {
+                Err(wait) => {
                     return RateLimitResult {
                         allowed: false,
                         limit: tpm,
-                        reset_after_secs: 60.0,
+                        reset_after_secs: wait.wait_secs,
                         scope,
                     };
                 }
-                Ok(Err(not_until)) => {
-                    let wait = not_until.wait_time_from(governor::clock::DefaultClock::default().now());
-                    return RateLimitResult {
-                        allowed: false,
-                        limit: tpm,
-                        reset_after_secs: wait.as_secs_f64(),
-                        scope,
-                    };
-                }
-                Ok(Ok(_)) => {}  // запрос разрешён
+                Ok(_) => {}
             }
         }
 
@@ -102,26 +193,16 @@ impl RateLimiterStore {
             scope,
         }
     }
-}
 
-impl RateLimitPair {
-    fn new(rpm: u32, tpm: u64) -> Self {
-        let rpm_q = if rpm > 0 {
-            Quota::per_minute(NonZeroU32::new(rpm).unwrap_or(NonZeroU32::MIN))
-        } else {
-            Quota::per_minute(NonZeroU32::new(1).unwrap())
-        };
-
-        let tpm_q = if tpm > 0 {
-            Quota::per_minute(NonZeroU32::new(tpm as u32).unwrap_or(NonZeroU32::MIN))
-        } else {
-            Quota::per_minute(NonZeroU32::new(1).unwrap())
-        };
-
-        Self {
-            rpm: GovernorLimiter::keyed(rpm_q),
-            tpm: GovernorLimiter::keyed(tpm_q),
+    /// Пост-фактное списание TPM на основе реального usage из upstream-ответа.
+    /// Вызывать после успешного проксирования.
+    pub fn consume_tpm(&self, key: &str, tpm: u64, tokens: u64) {
+        if tpm == 0 || tokens == 0 {
+            return;
         }
+        let pair = self.get_or_create(key, 0, tpm);
+        pair.touch();
+        pair.tpm.consume_n(tokens);
     }
 }
 
@@ -182,6 +263,30 @@ mod tests {
         }
         assert!(!store.check("tpm-key", 0, 10, 2, RateLimitScope::Token).allowed);
     }
+
+    #[test]
+    fn test_tpm_consume_reduces_future_budget() {
+        let store = RateLimiterStore::new();
+        // TPM=10. Предварительная проверка на 1 токен.
+        assert!(store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
+        // Пост-факт списание ещё 8 токенов (итого 9)
+        store.consume_tpm("tpm-consume", 10, 8);
+        // Остался 1 токен — проходит
+        assert!(store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
+        // 11-й токен — блок
+        assert!(!store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
+    }
+
+    #[test]
+    fn test_tpm_consume_can_overdraft() {
+        let store = RateLimiterStore::new();
+        // TPM=5. Предварительно списываем 1.
+        assert!(store.check("tpm-od", 0, 5, 1, RateLimitScope::Token).allowed);
+        // Пост-факт списание 10 токенов → уходим в овердрафт
+        store.consume_tpm("tpm-od", 5, 10);
+        // Следующий запрос сразу блокируется, пока бакет не пополнится
+        assert!(!store.check("tpm-od", 0, 5, 1, RateLimitScope::Token).allowed);
+    }
 }
 
 impl RateLimiterStore {
@@ -189,10 +294,12 @@ impl RateLimiterStore {
     pub fn start_cleanup(store: Arc<Self>) {
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                tokio::time::sleep(Duration::from_secs(300)).await;
+                let now = unix_now();
                 let before = store.limiters.len();
                 store.limiters.retain(|_, pair| {
-                    pair.rpm.len() > 0 || pair.tpm.len() > 0
+                    let idle = now.saturating_sub(pair.last_used.load(Ordering::Relaxed));
+                    idle < 600
                 });
                 if store.limiters.len() < before {
                     tracing::debug!(before, after = store.limiters.len(), "Rate limiter cleanup");
@@ -201,4 +308,3 @@ impl RateLimiterStore {
         });
     }
 }
-// TPM test at the end (outside the test module, runnable via cargo test)

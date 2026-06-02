@@ -446,6 +446,26 @@ pub async fn proxy_handler(
                         })
                         .unwrap_or((0, 0));
 
+                    // Пост-фактное списание TPM на основе реального usage из upstream
+                    let total_tokens = tokens_prompt.saturating_add(tokens_completion);
+                    if total_tokens > 1 {
+                        let cfg = state.config.load();
+                        let team_limits = cfg.teams.iter().find(|t| t.name == team)
+                            .and_then(|t| t.limits.as_ref());
+                        let team_tpm = team_limits.map(|l| l.tpm).unwrap_or(0);
+                        if team_tpm > 0 {
+                            let team_key = format!("team:{team}");
+                            state.limits.limiters.consume_tpm(&team_key, team_tpm, total_tokens - 1);
+                        }
+                        if token_tpm > 0 {
+                            state.limits.limiters.consume_tpm(&token_key, token_tpm, total_tokens - 1);
+                        }
+                        if current_endpoint.endpoint_limits_tpm > 0 {
+                            let ep_rl_key = format!("ep:{ep_key}");
+                            state.limits.limiters.consume_tpm(&ep_rl_key, current_endpoint.endpoint_limits_tpm, total_tokens - 1);
+                        }
+                    }
+
                     // Нормализуем ответ к строгому OpenAI-формату (как LiteLLM)
                     if let Some(ref mut json) = upstream_json {
                         normalize_openai_response(json, &model_name);
