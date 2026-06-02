@@ -9,27 +9,39 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
 use crate::utils::mask_key;
+
 /// Состояние одного эндпоинта
 #[derive(Debug, Clone)]
 pub struct EndpointHealth {
     pub healthy: bool,
     pub last_error: String,
+    pub last_latency_ms: u64,
+    pub last_check: Instant,
+    pub request_count: u64,
+    pub error_count: u64,
 }
 
 /// Хранилище статусов здоровья эндпоинтов (ключ = "url:masked_key")
 #[derive(Default)]
 pub struct HealthStore {
     states: DashMap<String, EndpointHealth>,
+    total_requests: AtomicU64,
+    total_errors: AtomicU64,
 }
 
 impl HealthStore {
     pub fn new() -> Self {
-        Self { states: DashMap::new() }
+        Self {
+            states: DashMap::new(),
+            total_requests: AtomicU64::new(0),
+            total_errors: AtomicU64::new(0),
+        }
     }
 
     pub fn get(&self, key: &str) -> Option<EndpointHealth> {
@@ -37,17 +49,59 @@ impl HealthStore {
     }
 
     pub fn set_healthy(&self, key: &str) {
-        self.states.insert(key.to_string(), EndpointHealth {
+        let mut entry = self.states.entry(key.to_string()).or_insert_with(|| EndpointHealth {
             healthy: true,
             last_error: String::new(),
+            last_latency_ms: 0,
+            last_check: Instant::now(),
+            request_count: 0,
+            error_count: 0,
         });
+        entry.healthy = true;
+        entry.last_error.clear();
+        entry.last_check = Instant::now();
     }
 
     pub fn set_unhealthy(&self, key: &str, error: &str) {
-        self.states.insert(key.to_string(), EndpointHealth {
+        let mut entry = self.states.entry(key.to_string()).or_insert_with(|| EndpointHealth {
             healthy: false,
             last_error: error.to_string(),
+            last_latency_ms: 0,
+            last_check: Instant::now(),
+            request_count: 0,
+            error_count: 0,
         });
+        entry.healthy = false;
+        entry.last_error = error.to_string();
+        entry.last_check = Instant::now();
+    }
+
+    pub fn record_latency(&self, key: &str, latency_ms: u64) {
+        if let Some(mut entry) = self.states.get_mut(key) {
+            entry.last_latency_ms = latency_ms;
+        }
+    }
+
+    pub fn record_request(&self, key: &str) {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        if let Some(mut entry) = self.states.get_mut(key) {
+            entry.request_count += 1;
+        }
+    }
+
+    pub fn record_error(&self, key: &str) {
+        self.total_errors.fetch_add(1, Ordering::Relaxed);
+        if let Some(mut entry) = self.states.get_mut(key) {
+            entry.error_count += 1;
+        }
+    }
+
+    pub fn total_requests(&self) -> u64 {
+        self.total_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn total_errors(&self) -> u64 {
+        self.total_errors.load(Ordering::Relaxed)
     }
 }
 

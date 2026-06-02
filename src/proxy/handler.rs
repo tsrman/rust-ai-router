@@ -389,12 +389,17 @@ pub async fn proxy_handler(
                             sync.publish_ban(&ep, 60).await;
                         });
                     }
+                    state.monitoring.health_store.record_error(&ep_key);
                 } else {
                     state.limits.fail2ban.record_success(&ep_key);
                 }
 
                 if upstream_status < 400 || !should_retry {
                     // Успех или не-retryable ошибка → возвращаем клиенту
+                    let latency_ms = latency.as_millis() as u64;
+                    state.monitoring.health_store.record_request(&ep_key);
+                    state.monitoring.health_store.record_latency(&ep_key, latency_ms);
+
                     if let Some(sid) = &session_id {
                         state.session.sticky.set(sid, current_endpoint.index);
                         // Синхронизируем sticky в Redis (fire-and-forget)
@@ -518,6 +523,7 @@ pub async fn proxy_handler(
                 let just_banned = state.limits.fail2ban.record_failure(&key_copy);
                 tracing::error!(endpoint = %key_copy, error = %e, banned = just_banned, "Upstream network error");
                 state.live_stats.record_error(&token_key, &team, &key_copy);
+                state.monitoring.health_store.record_error(&key_copy);
                 if just_banned {
                     let sync = state.limits.sync.clone();
                     let ep = key_copy.clone();
@@ -1089,13 +1095,16 @@ pub async fn proxy_generic(
             insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
             insert_header(headers, "x-latency-ms", &latency_ms.to_string());
 
-            // Record success/fail for fail2ban
+            let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+
+            // Record success/fail for fail2ban & health_store
             if status >= 400 && state.limits.fail2ban.is_fail_status(status) {
-                let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
                 state.limits.fail2ban.record_failure_with_code(&ep_key, status);
+                state.monitoring.health_store.record_error(&ep_key);
             } else {
-                let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
                 state.limits.fail2ban.record_success(&ep_key);
+                state.monitoring.health_store.record_request(&ep_key);
+                state.monitoring.health_store.record_latency(&ep_key, latency_ms);
             }
 
             resp
@@ -1103,6 +1112,7 @@ pub async fn proxy_generic(
         Err(e) => {
             let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
             state.limits.fail2ban.record_failure(&ep_key);
+            state.monitoring.health_store.record_error(&ep_key);
             json_error(
                 StatusCode::BAD_GATEWAY,
                 &format!("Upstream error: {e}"),

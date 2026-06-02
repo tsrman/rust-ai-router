@@ -24,6 +24,9 @@ pub async fn health_json(
                 let health = state.monitoring.health_store.get(&ep_key);
                 let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
                 let last_error = health.as_ref().map(|h| h.last_error.clone()).unwrap_or_default();
+                let requests = health.as_ref().map(|h| h.request_count).unwrap_or(0);
+                let errors = health.as_ref().map(|h| h.error_count).unwrap_or(0);
+                let latency_ms = health.as_ref().map(|h| h.last_latency_ms).unwrap_or(0);
 
                 json!({
                     "model": model.name,
@@ -32,6 +35,9 @@ pub async fn health_json(
                     "healthy": healthy,
                     "banned": banned,
                     "last_error": last_error,
+                    "requests": requests,
+                    "errors": errors,
+                    "last_latency_ms": latency_ms,
                     "rpm_limit": ep.limits.as_ref().map(|l| l.rpm).unwrap_or(0),
                     "tpm_limit": ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0),
                 })
@@ -77,6 +83,18 @@ pub async fn health_dashboard(
                 ("#4caf50", "UP")
             };
 
+            let requests = health.as_ref().map(|h| h.request_count).unwrap_or(0);
+            let errors = health.as_ref().map(|h| h.error_count).unwrap_or(0);
+            let success_rate = if requests > 0 {
+                ((requests - errors) as f64 / requests as f64 * 100.0).round()
+            } else {
+                100.0
+            };
+            let latency_ms = health.as_ref().map(|h| h.last_latency_ms).unwrap_or(0);
+            let last_check_secs = health.as_ref()
+                .map(|h| h.last_check.elapsed().as_secs())
+                .unwrap_or(9999);
+
             rows.push_str(&format!(
                 "<tr>
                     <td>{}</td>
@@ -86,6 +104,11 @@ pub async fn health_dashboard(
                     <td>{}</td>
                     <td>{}</td>
                     <td>{}</td>
+                    <td>{:.0}%</td>
+                    <td>{} ms</td>
+                    <td>{} s</td>
+                    <td>{}</td>
+                    <td>{}</td>
                 </tr>",
                 model.name,
                 i,
@@ -93,6 +116,11 @@ pub async fn health_dashboard(
                 color,
                 status_text,
                 reason,
+                requests,
+                errors,
+                success_rate,
+                latency_ms,
+                last_check_secs,
                 ep.limits.as_ref().map(|l| l.rpm).unwrap_or(0),
                 ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0),
             ));
@@ -100,6 +128,9 @@ pub async fn health_dashboard(
     }
 
     let total_endpoints: usize = cfg.models.iter().map(|m| m.endpoints.len()).sum();
+    let total_requests = state.monitoring.health_store.total_requests();
+    let total_errors = state.monitoring.health_store.total_errors();
+    let banned_count = state.limits.fail2ban.banned_count();
 
     Html(format!(
         r#"<!DOCTYPE html>
@@ -111,13 +142,14 @@ pub async fn health_dashboard(
     <style>
         body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0; margin: 0; padding: 20px; }}
         h1 {{ color: #7c4dff; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-        th {{ background: #16213e; padding: 12px; text-align: left; }}
-        td {{ padding: 10px; border-bottom: 1px solid #333; }}
+        table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 0.9em; }}
+        th {{ background: #16213e; padding: 10px; text-align: left; }}
+        td {{ padding: 8px; border-bottom: 1px solid #333; }}
         tr:hover {{ background: #16213e; }}
-        .summary {{ display: flex; gap: 20px; margin: 20px 0; }}
-        .card {{ background: #16213e; padding: 15px 25px; border-radius: 8px; }}
-        .card .value {{ font-size: 2em; font-weight: bold; color: #7c4dff; }}
+        .summary {{ display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap; }}
+        .card {{ background: #16213e; padding: 12px 20px; border-radius: 8px; min-width: 120px; }}
+        .card .value {{ font-size: 1.8em; font-weight: bold; color: #7c4dff; }}
+        .card .label {{ font-size: 0.85em; color: #aaa; }}
         .legend {{ margin-top: 10px; font-size: 0.9em; color: #888; }}
         .legend span {{ margin-right: 15px; }}
     </style>
@@ -125,10 +157,13 @@ pub async fn health_dashboard(
 <body>
     <h1>🔄 OpenAI Router</h1>
     <div class="summary">
-        <div class="card"><div>Models</div><div class="value">{}</div></div>
-        <div class="card"><div>Endpoints</div><div class="value">{}</div></div>
-        <div class="card"><div>Tokens</div><div class="value">{}</div></div>
-        <div class="card"><div>Teams</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Models</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Endpoints</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Tokens</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Teams</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Total Requests</div><div class="value">{}</div></div>
+        <div class="card"><div class="label">Total Errors</div><div class="value" style="color:#f44336">{}</div></div>
+        <div class="card"><div class="label">Banned</div><div class="value" style="color:#ff9800">{}</div></div>
     </div>
     <div class="legend">
         <span style='color:#4caf50'>● UP</span>
@@ -136,7 +171,20 @@ pub async fn health_dashboard(
         <span style='color:#f44336'>● BANNED</span>
     </div>
     <table>
-        <tr><th>Model</th><th>EP #</th><th>URL</th><th>Status</th><th>Reason</th><th>RPM</th><th>TPM</th></tr>
+        <tr>
+            <th>Model</th>
+            <th>EP #</th>
+            <th>URL</th>
+            <th>Status</th>
+            <th>Reason</th>
+            <th>Reqs</th>
+            <th>Errs</th>
+            <th>Success</th>
+            <th>Latency</th>
+            <th>Check</th>
+            <th>RPM</th>
+            <th>TPM</th>
+        </tr>
         {}
     </table>
     <p style="margin-top:20px; color:#666">Auto-refresh: 10s | <a href="/health" style="color:#7c4dff">JSON API</a> | <a href="/metrics" style="color:#7c4dff">Prometheus</a></p>
@@ -146,6 +194,9 @@ pub async fn health_dashboard(
         total_endpoints,
         cfg.tokens.len(),
         cfg.teams.len(),
+        total_requests,
+        total_errors,
+        banned_count,
         rows
     ))
 }
