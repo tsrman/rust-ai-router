@@ -12,7 +12,7 @@ pub struct SyncStore;
 #[cfg(not(feature = "redis-sync"))]
 impl SyncStore {
     pub fn new() -> Self { Self }
-    pub async fn connect(_url: &str, _prefix: &str) -> Result<Self, String> {
+    pub async fn connect(_cfg: &crate::config::SyncConfig) -> Result<Self, String> {
         Ok(Self)
     }
     pub async fn check_rate_limit(
