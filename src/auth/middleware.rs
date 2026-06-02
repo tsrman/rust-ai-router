@@ -1,14 +1,12 @@
 use arc_swap::ArcSwap;
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
     middleware::Next,
     response::Response,
 };
 use std::sync::Arc;
 
 use crate::config::AppConfig;
-use crate::utils::json_error;
 
 /// Контекст аутентификации, сохраняемый в request extensions
 #[derive(Debug, Clone)]
@@ -31,8 +29,8 @@ pub async fn auth_middleware(
 ) -> Response {
     let path = req.uri().path().to_string();
 
-    // Health и метрики — без аутентификации
-    if path == "/health" || path == "/vhealth" || path == "/metrics" {
+    // Health, metrics and public Ollama endpoints — no auth required
+    if path == "/health" || path == "/vhealth" || path == "/metrics" || path == "/api/version" {
         return next.run(req).await;
     }
 
@@ -47,13 +45,8 @@ pub async fn auth_middleware(
     let token_key = if let Some(key) = auth_header.strip_prefix("Bearer ") {
         key
     } else {
-        tracing::debug!(path = %path, auth_header = %auth_header, "Missing or malformed Bearer token");
-        return json_error(
-            StatusCode::UNAUTHORIZED,
-            "Missing Bearer token in Authorization header",
-            "authentication_error",
-            "missing_bearer_token",
-        );
+        tracing::debug!(path = %path, "No Bearer token, proceeding without auth context");
+        return next.run(req).await;
     };
 
     match cfg.resolve_token(token_key) {
@@ -80,13 +73,8 @@ pub async fn auth_middleware(
             next.run(req).await
         }
         None => {
-            tracing::warn!(path = %path, token = %crate::utils::mask_key(token_key), "Invalid token rejected");
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "Invalid API token provided",
-                "authentication_error",
-                "invalid_api_token",
-            )
+            tracing::warn!(path = %path, token = %crate::utils::mask_key(token_key), "Invalid token, proceeding without auth context");
+            next.run(req).await
         }
     }
 }

@@ -864,12 +864,32 @@ pub async fn proxy_generic(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     req: Request<Body>,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
-
     let auth = match req.extensions().get::<AuthContext>() {
         Some(ctx) => ctx.clone(),
-        None => return (StatusCode::UNAUTHORIZED, "Authentication required").into_response(),
+        None => {
+            return json_error(
+                StatusCode::UNAUTHORIZED,
+                "Authentication required. Please provide a valid Bearer token.",
+                "authentication_error",
+                "missing_auth",
+            );
+        }
     };
+
+    let req_path = req.uri().path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+
+    // Fallback should only proxy /v1/* paths — reject scanners early
+    if !req_path.starts_with("/v1/") {
+        tracing::debug!(path = %req_path, token = %mask_key(&auth.token_key), "Blocked non-v1 path in fallback");
+        return json_error(
+            StatusCode::NOT_FOUND,
+            "Not found",
+            "not_found",
+            "not_found",
+        );
+    }
 
     let cfg = state.config.load();
 
@@ -877,13 +897,9 @@ pub async fn proxy_generic(
     if let Some(rl_resp) = check_all_rate_limits(
         &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
     ).await {
+        state.live_stats.record_error(&auth.token_key, &auth.team, "rate_limited");
         return rl_resp;
     }
-
-    // Read body (extract path first — req moves into read_body_and_parse)
-    let req_path = req.uri().path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| "/".to_string());
 
     let content_type = req.headers()
         .get(axum::http::header::CONTENT_TYPE)

@@ -209,6 +209,16 @@ async fn main() -> anyhow::Result<()> {
         }))
         .with_state(state.clone());
 
+    // ── V1 routes (fallback only inside /v1/*) ──────────────────────────
+    let v1_routes = Router::new()
+        .route("/chat/completions", post(proxy::handler::proxy_handler))
+        .route("/responses", post(proxy::handler::proxy_handler))
+        .route("/completions", post(proxy::handler::proxy_handler))
+        .route("/messages", post(proxy::handler::proxy_handler))
+        .route("/models", get(list_models))
+        // Fallback: любые другие v1-эндпоинты (embeddings, rerank, tokenize, etc.)
+        .fallback(proxy::handler::proxy_generic);
+
     // ── Роутер ─────────────────────────────────────────────────────────
     let mut api_routes = Router::new()
         .route("/health", get(health::dashboard::health_json))
@@ -224,13 +234,9 @@ async fn main() -> anyhow::Result<()> {
                 ([("content-type", "text/plain; version=0.0.4")], buffer)
             }),
         )
-        .route("/v1/chat/completions", post(proxy::handler::proxy_handler))
-        .route("/v1/responses", post(proxy::handler::proxy_handler))
-        .route("/v1/completions", post(proxy::handler::proxy_handler))
-        .route("/v1/messages", post(proxy::handler::proxy_handler))
-        .route("/v1/models", get(list_models))
-        // Fallback: любые другие v1-эндпоинты (embeddings, rerank, tokenize, etc.)
-        .fallback(proxy::handler::proxy_generic)
+        .route("/api/tags", get(ollama_tags))
+        .route("/api/version", get(ollama_version))
+        .nest("/v1", v1_routes)
         .layer(trace_layer)
         .layer(cors);
 
@@ -320,6 +326,75 @@ async fn list_models(
     axum::Json(serde_json::json!({
         "object": "list",
         "data": models,
+    }))
+    .into_response()
+}
+
+// ── GET /api/tags — Ollama-compatible model list ───────────────────────
+
+async fn ollama_tags(
+    axum::extract::State(state): axum::extract::State<Arc<proxy::handler::AppState>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use axum::http::StatusCode;
+
+    let auth = match req.extensions().get::<crate::auth::AuthContext>() {
+        Some(ctx) => ctx.clone(),
+        None => {
+            return crate::utils::json_error(
+                StatusCode::UNAUTHORIZED,
+                "Authentication required. Please provide a valid Bearer token.",
+                "authentication_error",
+                "missing_auth",
+            );
+        }
+    };
+
+    let cfg = state.config.load();
+
+    if let Some(rl_resp) = proxy::handler::check_all_rate_limits(
+        &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
+    ).await {
+        state.live_stats.record_error(&auth.token_key, &auth.team, "rate_limited");
+        return rl_resp;
+    }
+
+    let models: Vec<serde_json::Value> = cfg
+        .models
+        .iter()
+        .filter(|m| cfg.token_has_model_access(&auth.token_key, &m.name))
+        .map(|m| {
+            serde_json::json!({
+                "name": m.name,
+                "model": m.name,
+                "modified_at": chrono::Utc::now().to_rfc3339(),
+                "size": 0,
+                "digest": "openai-router",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "openai",
+                    "families": [],
+                    "parameter_size": "",
+                    "quantization_level": ""
+                }
+            })
+        })
+        .collect();
+
+    axum::Json(serde_json::json!({
+        "models": models,
+    }))
+    .into_response()
+}
+
+// ── GET /api/version — Ollama-compatible version ───────────────────────
+
+async fn ollama_version() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    axum::Json(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
     }))
     .into_response()
 }

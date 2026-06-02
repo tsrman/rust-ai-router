@@ -417,6 +417,8 @@ LIMIT 20;
 | `GET` | `/health` | No | JSON health status of all endpoints |
 | `GET` | `/vhealth` | No | HTML health dashboard with auto-refresh |
 | `GET` | `/metrics` | No | Prometheus metrics (text format) |
+| `GET` | `/api/version` | No | Ollama-compatible version endpoint |
+| `GET` | `/api/tags` | Yes | Ollama-compatible model list |
 | `GET` | `/stats` | Yes | Live request statistics per token/team/endpoint |
 | `GET` | `/v1/models` | Yes | List available models (OpenAI-compatible) |
 | `POST` | `/v1/chat/completions` | Yes | Chat completions (proxied) |
@@ -603,6 +605,46 @@ Response (Anthropic format):
   "stop_reason": "end_turn",
   "content": [{"type": "text", "text": "Здравствуйте"}],
   "usage": {"input_tokens": 13, "output_tokens": 1}
+}
+```
+
+## Ollama Compatibility
+
+The router exposes a subset of the Ollama API so that Ollama-native clients (e.g. OpenWebUI) can discover and use models without explicit OpenAI configuration.
+
+| Ollama Endpoint | Status | Notes |
+|-----------------|--------|-------|
+| `GET /api/tags` | ✅ Supported | Returns model list in Ollama format (requires Bearer token) |
+| `GET /api/version` | ✅ Supported | Returns router version (no auth required) |
+| `POST /api/generate` | ❌ Not supported | Use `/v1/chat/completions` instead |
+| `POST /api/chat` | ❌ Not supported | Use `/v1/chat/completions` instead |
+
+### Example
+
+```bash
+curl http://localhost:8080/api/tags \
+  -H "Authorization: Bearer sk-admin-xxx"
+```
+
+Response:
+```json
+{
+  "models": [
+    {
+      "name": "gpt-4o",
+      "model": "gpt-4o",
+      "modified_at": "2024-01-01T00:00:00Z",
+      "size": 0,
+      "digest": "openai-router",
+      "details": {
+        "family": "openai",
+        "format": "gguf",
+        "families": [],
+        "parameter_size": "",
+        "quantization_level": ""
+      }
+    }
+  ]
 }
 ```
 
