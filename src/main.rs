@@ -262,6 +262,11 @@ async fn main() -> anyhow::Result<()> {
         health_routes.nest(&format!("/{bp}"), api_routes)
     };
 
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_hash = env!("GIT_HASH"),
+        "openai-router starting"
+    );
     tracing::info!("Server ready, accepting connections");
 
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;

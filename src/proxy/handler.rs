@@ -1,7 +1,7 @@
 use arc_swap::ArcSwap;
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{OriginalUri, Request, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response, Sse},
 };
@@ -113,9 +113,10 @@ fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &st
 /// Основной обработчик проксирования /v1/chat/completions etc.
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
+    OriginalUri(original_uri): OriginalUri,
     req: Request<Body>,
 ) -> Response {
-    let path = req.uri().path().to_string();
+    let path = original_uri.path().to_string();
 
     // Аутентификация
     let auth = req.extensions().get::<AuthContext>().cloned();
@@ -976,6 +977,7 @@ mod tests {
 /// (/v1/completions, /v1/embeddings, /v1/rerank, /v1/tokenize, etc.)
 pub async fn proxy_generic(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    OriginalUri(original_uri): OriginalUri,
     req: Request<Body>,
 ) -> axum::response::Response {
     let auth = match req.extensions().get::<AuthContext>() {
@@ -990,7 +992,7 @@ pub async fn proxy_generic(
         }
     };
 
-    let req_path = req.uri().path_and_query()
+    let req_path = original_uri.path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
 
