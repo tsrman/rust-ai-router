@@ -215,6 +215,24 @@ pub async fn stats_json(
     let team_errs = state.live_stats.errors_by_team.get(&auth.team).map(|v| *v).unwrap_or(0);
 
     let cfg = state.config.load();
+
+    // Token / team TPM state
+    let token_tpm_limit = auth.tpm as u64;
+    let token_tpm_remaining = if token_tpm_limit > 0 {
+        state.limits.limiters.get_tpm_state(&auth.token_key, token_tpm_limit).1
+    } else {
+        0
+    };
+
+    let team_limits = cfg.teams.iter().find(|t| t.name == auth.team).and_then(|t| t.limits.as_ref());
+    let team_tpm_limit = team_limits.map(|l| l.tpm).unwrap_or(0);
+    let team_tpm_remaining = if team_tpm_limit > 0 {
+        let team_key = format!("team:{}", auth.team);
+        state.limits.limiters.get_tpm_state(&team_key, team_tpm_limit).1
+    } else {
+        0
+    };
+
     let endpoints: Vec<serde_json::Value> = if is_admin {
         cfg.models.iter().flat_map(|model| {
             model.endpoints.iter().map(|ep| {
@@ -224,6 +242,13 @@ pub async fn stats_json(
                 let banned = state.limits.fail2ban.is_banned(&ep_key);
                 let health = state.monitoring.health_store.get(&ep_key);
                 let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+                let ep_tpm_limit = ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0);
+                let ep_tpm_remaining = if ep_tpm_limit > 0 {
+                    let ep_rl_key = format!("ep:{}", ep_key);
+                    state.limits.limiters.get_tpm_state(&ep_rl_key, ep_tpm_limit).1
+                } else {
+                    0
+                };
                 json!({
                     "model": model.name,
                     "url": mask_url(&ep.url),
@@ -231,6 +256,8 @@ pub async fn stats_json(
                     "errors": errs,
                     "banned": banned,
                     "healthy": healthy,
+                    "tpm_limit": ep_tpm_limit,
+                    "tpm_remaining": ep_tpm_remaining,
                 })
             })
         }).collect()
@@ -246,6 +273,13 @@ pub async fn stats_json(
                     let banned = state.limits.fail2ban.is_banned(&ep_key);
                     let health = state.monitoring.health_store.get(&ep_key);
                     let healthy = health.as_ref().map(|h| h.healthy).unwrap_or(true);
+                    let ep_tpm_limit = ep.limits.as_ref().map(|l| l.tpm).unwrap_or(0);
+                    let ep_tpm_remaining = if ep_tpm_limit > 0 {
+                        let ep_rl_key = format!("ep:{}", ep_key);
+                        state.limits.limiters.get_tpm_state(&ep_rl_key, ep_tpm_limit).1
+                    } else {
+                        0
+                    };
                     json!({
                         "model": model.name,
                         "url": mask_url(&ep.url),
@@ -253,6 +287,8 @@ pub async fn stats_json(
                         "errors": errs,
                         "banned": banned,
                         "healthy": healthy,
+                        "tpm_limit": ep_tpm_limit,
+                        "tpm_remaining": ep_tpm_remaining,
                     })
                 })
             })
@@ -265,8 +301,12 @@ pub async fn stats_json(
         "is_admin": is_admin,
         "token_requests": token_reqs,
         "token_errors": token_errs,
+        "token_tpm_limit": token_tpm_limit,
+        "token_tpm_remaining": token_tpm_remaining,
         "team_requests": team_reqs,
         "team_errors": team_errs,
+        "team_tpm_limit": team_tpm_limit,
+        "team_tpm_remaining": team_tpm_remaining,
         "endpoints": endpoints,
     });
 

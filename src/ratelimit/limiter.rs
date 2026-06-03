@@ -89,6 +89,13 @@ impl TpmLimiter {
         Self::refill(&mut s, self.capacity);
         s.tokens -= n as i64;
     }
+
+    /// Текущий остаток токенов (может быть отрицательным при овердрафте).
+    fn remaining(&self) -> i64 {
+        let mut s = self.state.lock();
+        Self::refill(&mut s, self.capacity);
+        s.tokens
+    }
 }
 
 struct RateLimitWait {
@@ -203,6 +210,17 @@ impl RateLimiterStore {
         let pair = self.get_or_create(key, 0, tpm);
         pair.touch();
         pair.tpm.consume_n(tokens);
+    }
+
+    /// Получить текущее состояние TPM: (limit, remaining).
+    /// Возвращает (0, 0) если лимит не задан.
+    pub fn get_tpm_state(&self, key: &str, tpm: u64) -> (u64, i64) {
+        if tpm == 0 {
+            return (0, 0);
+        }
+        let pair = self.get_or_create(key, 0, tpm);
+        let remaining = pair.tpm.remaining();
+        (tpm, remaining)
     }
 }
 

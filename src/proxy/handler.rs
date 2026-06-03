@@ -5,9 +5,12 @@ use axum::{
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
+use futures::StreamExt;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::auth::AuthContext;
 use crate::config::AppConfig;
@@ -192,6 +195,9 @@ pub async fn proxy_handler(
     // Каноническое имя модели + алиас → подмена в теле
     let cfg = state.config.load();
     let canonical_model = cfg.canonical_model_name(&model_name);
+    let team_tpm = cfg.teams.iter().find(|t| t.name == team)
+        .and_then(|t| t.limits.as_ref().map(|l| l.tpm))
+        .unwrap_or(0);
     let body_bytes = if canonical_model != model_name {
         let mut json = body_json;
         json["model"] = serde_json::Value::String(canonical_model.clone());
@@ -376,7 +382,136 @@ pub async fn proxy_handler(
 
         let start = std::time::Instant::now();
         let result = if is_stream {
-            proxy_streaming_forward(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &forwarded_headers).await
+            // Inline streaming with SSE usage parsing for post-fact TPM consumption
+            let body_value = match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Invalid JSON body: {e}"),
+                        "invalid_request_error",
+                        "body_parse_failed",
+                    );
+                }
+            };
+
+            let mut req_builder = state.client
+                .post(&upstream_url)
+                .header("Authorization", format!("Bearer {}", current_endpoint.api_key))
+                .header("Content-Type", "application/json")
+                .json(&body_value);
+
+            for name in &["x-request-id", "x-session-id", "user-agent"] {
+                if let Some(val) = forwarded_headers.get(*name) {
+                    req_builder = req_builder.header(*name, val);
+                }
+            }
+
+            let upstream_resp = match req_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return json_error(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("Upstream error: {e}"),
+                        "bad_gateway",
+                        "upstream_network_error",
+                    );
+                }
+            };
+            let status = upstream_resp.status();
+
+            if !status.is_success() {
+                let err_body = upstream_resp.text().await.unwrap_or_default();
+                let mut resp = (status, err_body).into_response();
+                resp.headers_mut().insert("content-type", "application/json".parse().unwrap());
+                Ok(resp)
+            } else {
+                let upstream_headers = upstream_resp.headers().clone();
+                let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(1024);
+
+                tokio::spawn({
+                    let limiters = state.limits.limiters.clone();
+                    let team = team.clone();
+                    let token_key = token_key.clone();
+                    let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+                    let team_tpm = team_tpm;
+                    let token_tpm = token_tpm as u64;
+                    let endpoint_limits_tpm = current_endpoint.endpoint_limits_tpm;
+
+                    async move {
+                        let mut usage_prompt = 0u64;
+                        let mut usage_completion = 0u64;
+                        let mut buffer = Vec::new();
+
+                        let mut byte_stream = upstream_resp.bytes_stream();
+                        while let Some(chunk) = byte_stream.next().await {
+                            match &chunk {
+                                Ok(bytes) => {
+                                    buffer.extend_from_slice(bytes);
+                                    while let Some(pos) = find_double_newline(&buffer) {
+                                        let event_bytes = buffer[..pos].to_vec();
+                                        buffer.drain(..pos + 2);
+
+                                        let event_str = String::from_utf8_lossy(&event_bytes);
+                                        for line in event_str.lines() {
+                                            if let Some(data) = line.strip_prefix("data: ") {
+                                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                                    if let Some(usage) = json.get("usage") {
+                                                        if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                                                            usage_prompt = p;
+                                                        }
+                                                        if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                                                            usage_completion = c;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                            let _ = tx.send(chunk).await;
+                        }
+
+                        let total = usage_prompt.saturating_add(usage_completion);
+                        if total > 1 {
+                            if team_tpm > 0 {
+                                let team_key = format!("team:{}", team);
+                                limiters.consume_tpm(&team_key, team_tpm, total - 1);
+                            }
+                            if token_tpm > 0 {
+                                limiters.consume_tpm(&token_key, token_tpm, total - 1);
+                            }
+                            if endpoint_limits_tpm > 0 {
+                                let ep_rl_key = format!("ep:{}", ep_key);
+                                limiters.consume_tpm(&ep_rl_key, endpoint_limits_tpm, total - 1);
+                            }
+                        }
+                    }
+                });
+
+                let mut response = Response::builder().status(status);
+                for (key, val) in upstream_headers.iter() {
+                    if key != "transfer-encoding"
+                        && key != "content-encoding"
+                        && key != "content-length"
+                        && key != "connection"
+                        && key != "keep-alive"
+                    {
+                        if let Some(hdr) = response.headers_mut() {
+                            if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                                hdr.insert(name, val.clone());
+                            }
+                        }
+                    }
+                }
+
+                let client_stream = ReceiverStream::new(rx);
+                Ok(response.body(Body::from_stream(client_stream)).unwrap_or_else(|_| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+                }))
+            }
         } else {
             proxy_regular(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &forwarded_headers).await
         };
@@ -801,6 +936,16 @@ fn mask_key(key: &str) -> String {
         return "***".into();
     }
     format!("{}...{}", &key[..4], &key[key.len() - 4..])
+}
+
+/// Найти границу между SSE-событиями (два подряд \n).
+fn find_double_newline(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(1) {
+        if data[i] == b'\n' && data[i + 1] == b'\n' {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Собрать OpenAI-совместимый ответ с заголовками при превышении rate limit.
