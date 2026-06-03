@@ -111,23 +111,25 @@ fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &st
     }
 }
 
+/// Убрать base_path из оригинального URI, оставив только путь после него.
+fn strip_base_path(path: &str, base_path: &str) -> String {
+    let bp = base_path.trim_start_matches('/');
+    if bp.is_empty() {
+        path.to_string()
+    } else {
+        path.strip_prefix(&format!("/{}", bp))
+            .unwrap_or(path)
+            .to_string()
+    }
+}
+
 /// Основной обработчик проксирования /v1/chat/completions etc.
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     OriginalUri(original_uri): OriginalUri,
     req: Request<Body>,
 ) -> Response {
-    let path = {
-        let bp = state.base_path.trim_start_matches('/');
-        let raw = original_uri.path();
-        if bp.is_empty() {
-            raw.to_string()
-        } else {
-            raw.strip_prefix(&format!("/{}", bp))
-                .unwrap_or(raw)
-                .to_string()
-        }
-    };
+    let path = strip_base_path(original_uri.path(), &state.base_path);
 
     // Аутентификация
     let auth = req.extensions().get::<AuthContext>().cloned();
@@ -1003,19 +1005,10 @@ pub async fn proxy_generic(
         }
     };
 
-    let req_path = {
-        let bp = state.base_path.trim_start_matches('/');
-        let raw = original_uri.path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
-        if bp.is_empty() {
-            raw.to_string()
-        } else {
-            raw.strip_prefix(&format!("/{}", bp))
-                .unwrap_or(raw)
-                .to_string()
-        }
-    };
+    let req_path = strip_base_path(
+        original_uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"),
+        &state.base_path,
+    );
 
     // Fallback should only proxy /v1/* paths — reject scanners early
     if !req_path.starts_with("/v1/") {
@@ -1389,5 +1382,49 @@ mod header_tests {
             "connection must not be copied"
         );
         assert_eq!(headers.get("x-upstream").unwrap(), "yes");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::strip_base_path;
+
+    #[test]
+    fn test_strip_base_path_empty() {
+        assert_eq!(strip_base_path("/v1/chat/completions", ""), "/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_strip_base_path_with_prefix() {
+        assert_eq!(
+            strip_base_path("/rustrouter/v1/chat/completions", "rustrouter"),
+            "/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_strip_base_path_with_leading_slash() {
+        assert_eq!(strip_base_path("/api/v1/models", "/api"), "/v1/models");
+    }
+
+    #[test]
+    fn test_strip_base_path_no_match() {
+        assert_eq!(
+            strip_base_path("/v1/chat/completions", "rustrouter"),
+            "/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_strip_base_path_root() {
+        assert_eq!(strip_base_path("/health", "rustrouter"), "/health");
+    }
+
+    #[test]
+    fn test_strip_base_path_with_query() {
+        assert_eq!(
+            strip_base_path("/rustrouter/v1/models?details=true", "rustrouter"),
+            "/v1/models?details=true"
+        );
     }
 }
