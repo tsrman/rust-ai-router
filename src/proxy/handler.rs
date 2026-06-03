@@ -3,15 +3,11 @@ use axum::{
     body::Body,
     extract::{OriginalUri, Request, State},
     http::{header, StatusCode},
-    response::{IntoResponse, Response, Sse},
+    response::{IntoResponse, Response},
 };
-use axum::response::sse::{Event, KeepAlive};
-use futures::stream::Stream;
 use reqwest::Client;
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use crate::auth::AuthContext;
 use crate::config::AppConfig;
@@ -380,7 +376,7 @@ pub async fn proxy_handler(
 
         let start = std::time::Instant::now();
         let result = if is_stream {
-            proxy_streaming(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes).await
+            proxy_streaming_forward(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &forwarded_headers).await
         } else {
             proxy_regular(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &forwarded_headers).await
         };
@@ -434,6 +430,39 @@ pub async fn proxy_handler(
                         .observe(latency.as_secs_f64());
 
                     let mut resp = upstream_resp;
+
+                    // Streaming: forward immediately without buffering or JSON parsing
+                    if is_stream {
+                        let headers = resp.headers_mut();
+                        insert_header(headers, "x-endpoint-used", &current_endpoint.url);
+                        insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
+                        insert_header(headers, "x-latency-ms", &latency.as_millis().to_string());
+                        insert_header(headers, "x-instance", &std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".into()));
+                        if current_endpoint.cost_prompt > 0.0 || current_endpoint.cost_completion > 0.0 {
+                            insert_header(headers, "x-cost-prompt-per-1m", &current_endpoint.cost_prompt.to_string());
+                            insert_header(headers, "x-cost-completion-per-1m", &current_endpoint.cost_completion.to_string());
+                        }
+
+                        // Fire-and-forget stats (no token counting for streaming)
+                        let stats = state.monitoring.stats.clone();
+                        let model = canonical_model.clone();
+                        let ep_url = current_endpoint.url.clone();
+                        let team_name = team.clone();
+                        let latency_ms = latency.as_millis() as u64;
+                        let token_hash = {
+                            use std::hash::Hasher;
+                            let mut h = std::collections::hash_map::DefaultHasher::new();
+                            std::hash::Hash::hash(&token_key, &mut h);
+                            format!("{:x}", h.finish())
+                        };
+                        let cp = current_endpoint.cost_prompt;
+                        let cc = current_endpoint.cost_completion;
+                        tokio::spawn(async move {
+                            stats.record_request(&model, &ep_url, &team_name, 0, 0, latency_ms, upstream_status, Some(&token_hash), cp, cc).await;
+                        });
+
+                        return resp;
+                    }
 
                     // Читаем тело для извлечения usage и Anthropic-перевода
                     let resp_body_bytes = axum::body::to_bytes(
@@ -708,107 +737,63 @@ async fn proxy_regular(
         }))
 }
 
-/// SSE streaming проксирование
-async fn proxy_streaming(
+/// Streaming proxy: forward raw bytes without buffering or JSON parsing.
+async fn proxy_streaming_forward(
     client: &Client,
     url: &str,
     api_key: &str,
     body: &[u8],
+    forwarded_headers: &HashMap<String, axum::http::HeaderValue>,
 ) -> Result<Response, anyhow::Error> {
     let body_value: serde_json::Value = serde_json::from_slice(body)?;
 
-    let upstream_resp = client
+    let mut req_builder = client
         .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .json(&body_value)
-        .send()
-        .await?;
+        .json(&body_value);
 
-    if !upstream_resp.status().is_success() {
-        let status = upstream_resp.status();
+    for name in &["x-request-id", "x-session-id", "user-agent"] {
+        if let Some(val) = forwarded_headers.get(*name) {
+            req_builder = req_builder.header(*name, val);
+        }
+    }
+
+    let upstream_resp = req_builder.send().await?;
+    let status = upstream_resp.status();
+
+    if !status.is_success() {
         let err_body = upstream_resp.text().await.unwrap_or_default();
         let mut resp = (status, err_body).into_response();
         resp.headers_mut().insert("content-type", "application/json".parse().unwrap());
         return Ok(resp);
     }
 
+    let upstream_headers = upstream_resp.headers().clone();
     let byte_stream = upstream_resp.bytes_stream();
 
-    let sse_stream = SseStream {
-        inner: Box::pin(byte_stream),
-        buffer: Vec::new(),
-    };
+    let mut response = Response::builder().status(status);
 
-    Ok(Sse::new(sse_stream)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-/// Поток, преобразующий байтовый поток reqwest в SSE события axum
-struct SseStream {
-    inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>>,
-    buffer: Vec<u8>,
-}
-
-impl Stream for SseStream {
-    type Item = Result<Event, std::convert::Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        loop {
-            match self.inner.as_mut().poll_next(cx) {
-                Poll::Ready(Some(Ok(chunk))) => {
-                    self.buffer.extend_from_slice(&chunk);
-                    // Защита от бесконечного роста (1MB max)
-                    if self.buffer.len() > 1_048_576 {
-                        tracing::error!("SSE buffer overflow ({} bytes), truncating", self.buffer.len());
-                        self.buffer.clear();
-                        return Poll::Ready(Some(Ok(Event::default().data(
-                            r#"{"error":"buffer overflow"}"#
-                        ))));
-                    }
-                    while let Some(pos) = find_sse_boundary(&self.buffer) {
-                        let event_bytes = self.buffer[..pos].to_vec();
-                        self.buffer.drain(..pos + 2);
-
-                        let event_str = String::from_utf8_lossy(&event_bytes);
-                        return Poll::Ready(Some(Ok(Event::default().data(event_str.to_string()))));
-                    }
+    for (key, val) in upstream_headers.iter() {
+        if key != "transfer-encoding"
+            && key != "content-encoding"
+            && key != "content-length"
+            && key != "connection"
+            && key != "keep-alive"
+        {
+            if let Some(hdr) = response.headers_mut() {
+                if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    hdr.insert(name, val.clone());
                 }
-                Poll::Ready(Some(Err(e))) => {
-                    tracing::error!("SSE stream error: {e}");
-                    return Poll::Ready(Some(Ok(Event::default().data(
-                        format!(r#"{{"error":"{e}"}}"#)
-                    ))));
-                }
-                Poll::Ready(None) => {
-                    // Отдаём оставшиеся события из буфера по одному
-                    if let Some(pos) = find_sse_boundary(&self.buffer) {
-                        let event_bytes = self.buffer[..pos].to_vec();
-                        self.buffer.drain(..pos + 2);
-                        let event_str = String::from_utf8_lossy(&event_bytes);
-                        return Poll::Ready(Some(Ok(Event::default().data(event_str.to_string()))));
-                    }
-                    if !self.buffer.is_empty() {
-                        let remaining = String::from_utf8_lossy(&self.buffer).to_string();
-                        self.buffer.clear();
-                        return Poll::Ready(Some(Ok(Event::default().data(remaining))));
-                    }
-                    return Poll::Ready(None);
-                }
-                Poll::Pending => return Poll::Pending,
             }
         }
     }
-}
 
-fn find_sse_boundary(data: &[u8]) -> Option<usize> {
-    for i in 0..data.len().saturating_sub(1) {
-        if data[i] == b'\n' && data[i + 1] == b'\n' {
-            return Some(i);
-        }
-    }
-    None
+    Ok(response
+        .body(Body::from_stream(byte_stream))
+        .unwrap_or_else(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        }))
 }
 
 fn mask_key(key: &str) -> String {
@@ -1037,7 +1022,7 @@ pub async fn proxy_generic(
         .unwrap_or("")
         .to_string();
 
-    let (body_bytes, model_name) = if content_type.starts_with("application/json") {
+    let (body_bytes, model_name, is_stream) = if content_type.starts_with("application/json") {
         let (bytes, json) = match read_body_and_parse(req).await {
             Ok(v) => v,
             Err(resp) => return resp,
@@ -1046,7 +1031,8 @@ pub async fn proxy_generic(
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
-        (bytes, model)
+        let stream = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+        (bytes, model, stream)
     } else {
         // Non-JSON body — для multipart парсим поле model из формы
         let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
@@ -1076,7 +1062,7 @@ pub async fn proxy_generic(
             .or_else(|| cfg.models.first().map(|m| m.name.clone()));
 
         match model {
-            Some(m) => (bytes, m),
+            Some(m) => (bytes, m, false),
             None => return json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "No models configured",
@@ -1112,12 +1098,12 @@ pub async fn proxy_generic(
 
     // Proxy raw (don't parse response — just forward)
     let start = std::time::Instant::now();
-    match proxy_raw(
-        &state.client,
-        &upstream_url,
-        &current_endpoint.api_key,
-        &body_bytes,
-    ).await {
+    let result = if is_stream {
+        proxy_streaming_forward(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &HashMap::new()).await
+    } else {
+        proxy_raw(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes).await
+    };
+    match result {
         Ok(resp) => {
             let latency = start.elapsed();
             let status = resp.status().as_u16();
@@ -1182,7 +1168,7 @@ async fn proxy_raw(
 
     let status = resp.status();
     let upstream_headers = resp.headers().clone();
-    let body_bytes = resp.bytes().await?;
+    let byte_stream = resp.bytes_stream();
 
     let mut response = Response::builder().status(status);
     if let Some(hdr) = response.headers_mut() {
@@ -1202,7 +1188,7 @@ async fn proxy_raw(
         }
     }
 
-    Ok(response.body(Body::from(body_bytes))?)
+    Ok(response.body(Body::from_stream(byte_stream))?)
 }
 
 /// Определить тип модели по пути запроса
@@ -1382,6 +1368,58 @@ mod header_tests {
             "connection must not be copied"
         );
         assert_eq!(headers.get("x-upstream").unwrap(), "yes");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_streaming_forward_preserves_sse_and_skips_hop_by_hop() {
+        let body = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n";
+        let app = axum::Router::new().route(
+            "/",
+            post(move || async move {
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-type", "text/event-stream")
+                    .header("content-length", body.len().to_string())
+                    .header("connection", "keep-alive")
+                    .header("x-custom", "value")
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = Client::new();
+        let result = proxy_streaming_forward(
+            &client,
+            &format!("http://{addr}/"),
+            "test-key",
+            br#"{"model":"gpt-4","messages":[]}"#,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let headers = result.headers();
+        assert!(
+            headers.get("content-length").is_none(),
+            "content-length must not be copied from upstream"
+        );
+        assert!(
+            headers.get("connection").is_none(),
+            "connection must not be copied"
+        );
+        assert_eq!(headers.get("content-type").unwrap(), "text/event-stream");
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
+
+        // Verify body streams through correctly (no double data: prefix)
+        let body_bytes = axum::body::to_bytes(result.into_body(), 1024 * 1024).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"));
+        assert!(body_str.contains("data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}"));
     }
 }
 
