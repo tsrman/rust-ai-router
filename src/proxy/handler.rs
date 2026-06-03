@@ -671,7 +671,14 @@ async fn proxy_regular(
     let mut response = Response::builder().status(status);
 
     for (key, val) in upstream_headers.iter() {
-        if key != "transfer-encoding" && key != "content-encoding" {
+        // Skip hop-by-hop and length-related headers: reqwest already decoded the body,
+        // so the original content-length is wrong. Let axum compute it automatically.
+        if key != "transfer-encoding"
+            && key != "content-encoding"
+            && key != "content-length"
+            && key != "connection"
+            && key != "keep-alive"
+        {
             if let Some(hdr) = response.headers_mut() {
                 if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
                     hdr.insert(name, val.clone());
@@ -1164,7 +1171,14 @@ async fn proxy_raw(
     let mut response = Response::builder().status(status);
     if let Some(hdr) = response.headers_mut() {
         for (key, val) in upstream_headers.iter() {
-            if key != "transfer-encoding" && key != "content-encoding" {
+            // Skip hop-by-hop and length-related headers: reqwest already decoded the body,
+            // so the original content-length is wrong. Let axum compute it automatically.
+            if key != "transfer-encoding"
+                && key != "content-encoding"
+                && key != "content-length"
+                && key != "connection"
+                && key != "keep-alive"
+            {
                 if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
                     hdr.insert(name, val.clone());
                 }
@@ -1254,4 +1268,103 @@ pub async fn check_all_rate_limits(
     }
 
     None
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+    use axum::routing::post;
+
+    #[tokio::test]
+    async fn test_proxy_regular_skips_content_length_and_hop_by_hop() {
+        let body = r#"{"ok":true}"#;
+        let app = axum::Router::new().route(
+            "/",
+            post(move || async move {
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .header("content-length", body.len().to_string())
+                    .header("connection", "keep-alive")
+                    .header("keep-alive", "timeout=5")
+                    .header("x-custom", "value")
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = Client::new();
+        let result = proxy_regular(
+            &client,
+            &format!("http://{addr}/"),
+            "test-key",
+            b"{}",
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+        let headers = result.headers();
+        assert!(
+            headers.get("content-length").is_none(),
+            "content-length must not be copied from upstream"
+        );
+        assert!(
+            headers.get("connection").is_none(),
+            "connection must not be copied"
+        );
+        assert!(
+            headers.get("keep-alive").is_none(),
+            "keep-alive must not be copied"
+        );
+        assert_eq!(headers.get("x-custom").unwrap(), "value");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_raw_skips_content_length_and_hop_by_hop() {
+        let body = "hello";
+        let app = axum::Router::new().route(
+            "/",
+            post(move || async move {
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-length", body.len().to_string())
+                    .header("connection", "close")
+                    .header("x-upstream", "yes")
+                    .body(Body::from(body))
+                    .unwrap()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = Client::new();
+        let result = proxy_raw(
+            &client,
+            &format!("http://{addr}/"),
+            "test-key",
+            b"body",
+        )
+        .await
+        .unwrap();
+
+        let headers = result.headers();
+        assert!(
+            headers.get("content-length").is_none(),
+            "content-length must not be copied from upstream"
+        );
+        assert!(
+            headers.get("connection").is_none(),
+            "connection must not be copied"
+        );
+        assert_eq!(headers.get("x-upstream").unwrap(), "yes");
+    }
 }
