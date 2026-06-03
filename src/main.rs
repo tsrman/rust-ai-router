@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
             health_store,
         },
         live_stats: Arc::new(proxy::handler::LiveStats::default()),
+        base_path: base_path.clone(),
     });
 
     let prometheus_registry = prometheus::default_registry();

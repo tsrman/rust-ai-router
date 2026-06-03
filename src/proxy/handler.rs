@@ -78,6 +78,7 @@ pub struct AppState {
     pub session: SessionState,
     pub monitoring: MonitoringState,
     pub live_stats: Arc<LiveStats>,
+    pub base_path: String,
 }
 
 /// Нормализовать JSON-ответ от upstream к строгому OpenAI-формату.
@@ -116,7 +117,17 @@ pub async fn proxy_handler(
     OriginalUri(original_uri): OriginalUri,
     req: Request<Body>,
 ) -> Response {
-    let path = original_uri.path().to_string();
+    let path = {
+        let bp = state.base_path.trim_start_matches('/');
+        let raw = original_uri.path();
+        if bp.is_empty() {
+            raw.to_string()
+        } else {
+            raw.strip_prefix(&format!("/{}", bp))
+                .unwrap_or(raw)
+                .to_string()
+        }
+    };
 
     // Аутентификация
     let auth = req.extensions().get::<AuthContext>().cloned();
@@ -992,9 +1003,19 @@ pub async fn proxy_generic(
         }
     };
 
-    let req_path = original_uri.path_and_query()
-        .map(|pq| pq.as_str().to_string())
-        .unwrap_or_else(|| "/".to_string());
+    let req_path = {
+        let bp = state.base_path.trim_start_matches('/');
+        let raw = original_uri.path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+        if bp.is_empty() {
+            raw.to_string()
+        } else {
+            raw.strip_prefix(&format!("/{}", bp))
+                .unwrap_or(raw)
+                .to_string()
+        }
+    };
 
     // Fallback should only proxy /v1/* paths — reject scanners early
     if !req_path.starts_with("/v1/") {
