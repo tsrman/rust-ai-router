@@ -326,6 +326,7 @@ pub async fn proxy_handler(
 
     loop {
         let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+        let masked_ep_key = format!("{}:{}", crate::utils::mask_endpoint_url(&current_endpoint.url), mask_key(&current_endpoint.api_key));
 
         // Rate limiting: эндпоинт (sync → локальный)
         if current_endpoint.endpoint_limits_rpm > 0 || current_endpoint.endpoint_limits_tpm > 0 {
@@ -336,7 +337,7 @@ pub async fn proxy_handler(
                 let sync_rl = state.limits.sync.check_rate_limit("ep", &ep_key, current_endpoint.endpoint_limits_rpm as u64).await;
                 if !sync_rl.allowed {
                     let key_copy = ep_key.clone();
-                    prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &key_copy]).inc();
+                    prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &masked_ep_key]).inc();
                     tracing::debug!(endpoint = %key_copy, "Endpoint sync rate limited, trying next");
                     tried_keys.insert(key_copy);
                     match state.router.select_available(&canonical_model, &banned_keys, &tried_keys) {
@@ -360,7 +361,7 @@ pub async fn proxy_handler(
             if !ep_rl.allowed {
                 // Rate limited — пробуем следующий
                 let key_copy = ep_key.clone();
-                prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &key_copy]).inc();
+                prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &masked_ep_key]).inc();
                 tracing::debug!(endpoint = %key_copy, "Endpoint rate limited, trying next");
                 tried_keys.insert(key_copy);
                 // Переход к следующему эндпоинту
@@ -558,10 +559,10 @@ pub async fn proxy_handler(
                     }
 
                     prometheus::REQUEST_COUNT
-                        .with_label_values(&[&canonical_model, &ep_key, &upstream_status.to_string()])
+                        .with_label_values(&[&canonical_model, &masked_ep_key, &upstream_status.to_string()])
                         .inc();
                     prometheus::REQUEST_LATENCY
-                        .with_label_values(&[&canonical_model, &ep_key])
+                        .with_label_values(&[&canonical_model, &masked_ep_key])
                         .observe(latency.as_secs_f64());
 
                     let mut resp = upstream_resp;
@@ -743,7 +744,7 @@ pub async fn proxy_handler(
                     );
                 } else {
                     prometheus::REQUEST_COUNT
-                        .with_label_values(&[&canonical_model, &key_copy, "error"])
+                        .with_label_values(&[&canonical_model, &masked_ep_key, "error"])
                         .inc();
                     return json_error(
                         StatusCode::BAD_GATEWAY,

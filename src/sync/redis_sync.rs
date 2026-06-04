@@ -42,7 +42,7 @@ impl SyncStore {
             .await
             .map_err(|e| format!("Redis PING failed: {e}"))?;
 
-        tracing::info!(url = %crate::utils::mask_url(url), prefix, "Redis sync connected (standalone)");
+        tracing::info!(url = %crate::utils::mask_redis_url(url), prefix, "Redis sync connected (standalone)");
         Ok(Self { conn: Some(conn), prefix: prefix.to_string() })
     }
 
