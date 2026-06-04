@@ -112,7 +112,7 @@ fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &st
 
 /// Убрать base_path из оригинального URI, оставив только путь после него.
 fn strip_base_path(path: &str, base_path: &str) -> String {
-    let bp = base_path.trim_start_matches('/');
+    let bp = base_path.trim_start_matches('/').trim_end_matches('/');
     if bp.is_empty() {
         path.to_string()
     } else {
@@ -1595,6 +1595,14 @@ mod path_tests {
     #[test]
     fn test_strip_base_path_with_leading_slash() {
         assert_eq!(strip_base_path("/api/v1/models", "/api"), "/v1/models");
+    }
+
+    #[test]
+    fn test_strip_base_path_with_trailing_slash() {
+        assert_eq!(
+            strip_base_path("/rustrouter/v1/embeddings", "rustrouter/"),
+            "/v1/embeddings"
+        );
     }
 
     #[test]
