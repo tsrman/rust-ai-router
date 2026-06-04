@@ -132,6 +132,12 @@ pub async fn health_dashboard(
     let total_errors = state.monitoring.health_store.total_errors();
     let banned_count = state.limits.fail2ban.banned_count();
 
+    let base_prefix = if state.base_path.is_empty() {
+        String::new()
+    } else {
+        format!("/{}", state.base_path.trim_start_matches('/'))
+    };
+
     Html(format!(
         r#"<!DOCTYPE html>
 <html>
@@ -187,7 +193,7 @@ pub async fn health_dashboard(
         </tr>
         {}
     </table>
-    <p style="margin-top:20px; color:#666">Auto-refresh: 10s | <a href="/health" style="color:#7c4dff">JSON API</a> | <a href="/metrics" style="color:#7c4dff">Prometheus</a></p>
+    <p style="margin-top:20px; color:#666">Auto-refresh: 10s | <a href="{}/health" style="color:#7c4dff">JSON API</a> | <a href="{}/metrics" style="color:#7c4dff">Prometheus</a></p>
 </body>
 </html>"#,
         cfg.models.len(),
@@ -197,7 +203,9 @@ pub async fn health_dashboard(
         total_requests,
         total_errors,
         banned_count,
-        rows
+        rows,
+        base_prefix,
+        base_prefix,
     ))
 }
 
