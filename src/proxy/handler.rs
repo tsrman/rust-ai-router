@@ -1247,7 +1247,7 @@ pub async fn proxy_generic(
     let result = if is_stream {
         proxy_streaming_forward(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &HashMap::new()).await
     } else {
-        proxy_raw(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes).await
+        proxy_raw(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &content_type).await
     };
     match result {
         Ok(resp) => {
@@ -1304,13 +1304,18 @@ async fn proxy_raw(
     url: &str,
     api_key: &str,
     body: &[u8],
+    content_type: &str,
 ) -> Result<Response<Body>, anyhow::Error> {
-    let resp = client
+    let mut req_builder = client
         .post(url)
         .header("Authorization", format!("Bearer {api_key}"))
-        .body(body.to_vec())
-        .send()
-        .await?;
+        .body(body.to_vec());
+
+    if !content_type.is_empty() {
+        req_builder = req_builder.header("Content-Type", content_type);
+    }
+
+    let resp = req_builder.send().await?;
 
     let status = resp.status();
     let upstream_headers = resp.headers().clone();
@@ -1500,6 +1505,7 @@ mod header_tests {
             &format!("http://{addr}/"),
             "test-key",
             b"body",
+            "application/json",
         )
         .await
         .unwrap();
