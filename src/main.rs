@@ -201,35 +201,39 @@ async fn main() -> anyhow::Result<()> {
         );
 
     // ── Health routes (root, без auth) ──────────────────────────────────
-    let health_routes = Router::new()
-        .route("/health", get(health::dashboard::health_json))
-        .route("/vhealth", get(health::dashboard::health_dashboard))
-        .route("/metrics", get(|| async move {
-            let encoder = TextEncoder::new();
-            let metric_families = prometheus::default_registry().gather();
-            let mut buffer = vec![];
-            encoder.encode(&metric_families, &mut buffer).unwrap();
-            ([("content-type", "text/plain; version=0.0.4")], buffer)
-        }))
-        .with_state(state.clone());
-
+    
+    // ── Монтирование ────────────────────────────────────────────────────
+    // When base_path is set, we prefix all route paths to avoid axum 0.7's
+    // double-nesting + fallback bug (outer .nest() + inner .nest() + .fallback() = 404).
+    // All routes are registered at the top level with full paths.
+    
+    let bp = if base_path.is_empty() {
+        String::new()
+    } else {
+        let trimmed = base_path.trim_start_matches('/').trim_end_matches('/');
+        tracing::info!(addr = %listen_addr, base_path = %trimmed, "Listening (base_path, prefixed routes)");
+        format!("/{}", trimmed)
+    };
+    
+    let v1_prefix = format!("{}{}", bp, "/v1");
+    
     // ── V1 routes (fallback only inside /v1/*) ──────────────────────────
     let v1_routes = Router::new()
-        .route("/chat/completions", post(proxy::handler::proxy_handler))
-        .route("/responses", post(proxy::handler::proxy_handler))
-        .route("/completions", post(proxy::handler::proxy_handler))
-        .route("/messages", post(proxy::handler::proxy_handler))
-        .route("/models", get(list_models))
+        .route(&format!("{}{}", v1_prefix, "/chat/completions"), post(proxy::handler::proxy_handler))
+        .route(&format!("{}{}", v1_prefix, "/responses"), post(proxy::handler::proxy_handler))
+        .route(&format!("{}{}", v1_prefix, "/completions"), post(proxy::handler::proxy_handler))
+        .route(&format!("{}{}", v1_prefix, "/messages"), post(proxy::handler::proxy_handler))
+        .route(&format!("{}{}", v1_prefix, "/models"), get(list_models))
         // Fallback: любые другие v1-эндпоинты (embeddings, rerank, tokenize, etc.)
         .fallback(proxy::handler::proxy_generic);
 
     // ── Роутер ─────────────────────────────────────────────────────────
     let mut api_routes = Router::new()
-        .route("/health", get(health::dashboard::health_json))
-        .route("/vhealth", get(health::dashboard::health_dashboard))
-        .route("/stats", get(health::dashboard::stats_json))
+        .route(&format!("{}{}", bp, "/health"), get(health::dashboard::health_json))
+        .route(&format!("{}{}", bp, "/vhealth"), get(health::dashboard::health_dashboard))
+        .route(&format!("{}{}", bp, "/stats"), get(health::dashboard::stats_json))
         .route(
-            "/metrics",
+            &format!("{}{}", bp, "/metrics"),
             get(move || async move {
                 let encoder = TextEncoder::new();
                 let metric_families = prometheus_registry.gather();
@@ -238,9 +242,9 @@ async fn main() -> anyhow::Result<()> {
                 ([("content-type", "text/plain; version=0.0.4")], buffer)
             }),
         )
-        .route("/api/tags", get(ollama_tags))
-        .route("/api/version", get(ollama_version))
-        .nest("/v1", v1_routes)
+        .route(&format!("{}{}", bp, "/api/tags"), get(ollama_tags))
+        .route(&format!("{}{}", bp, "/api/version"), get(ollama_version))
+        .merge(v1_routes)
         .layer(trace_layer)
         .layer(cors);
 
@@ -252,22 +256,16 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    let api_routes = api_routes
+    let app = api_routes
         .layer(middleware::from_fn_with_state(
             config.clone(),
             auth::middleware::auth_middleware,
         ))
         .with_state(state);
-
-    // ── Монтирование (root + base_path) ────────────────────────────────
-    let app = if base_path.is_empty() {
+    
+    if bp.is_empty() {
         tracing::info!(addr = %listen_addr, "Listening (root path)");
-        api_routes
-    } else {
-        let bp = base_path.trim_start_matches('/');
-        tracing::info!(addr = %listen_addr, base_path = %bp, "Listening (root + nested)");
-        health_routes.nest(&format!("/{bp}"), api_routes)
-    };
+    }
 
     tracing::info!("Server ready, accepting connections");
 

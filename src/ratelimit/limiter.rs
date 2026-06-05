@@ -36,16 +36,23 @@ struct TpmLimiter {
 struct TpmState {
     tokens: i64,
     last_update: Instant,
+    /// Accumulated consumed tokens in the current 60s window (for accurate stats reporting).
+    /// Stored as (window_start_instant, total_consumed).
+    window_start: Instant,
+    window_consumed: u64,
 }
 
 impl TpmLimiter {
     fn new(capacity: u64) -> Self {
         let cap = capacity.max(1) as i64;
+        let now = Instant::now();
         Self {
             capacity,
             state: Mutex::new(TpmState {
                 tokens: cap,
-                last_update: Instant::now(),
+                last_update: now,
+                window_start: now,
+                window_consumed: 0,
             }),
         }
     }
@@ -70,6 +77,14 @@ impl TpmLimiter {
         let n_i64 = n as i64;
         if s.tokens >= n_i64 {
             s.tokens -= n_i64;
+            // Track in window for accurate stats
+            let now = Instant::now();
+            if now.duration_since(s.window_start) > Duration::from_secs(60) {
+                s.window_start = now;
+                s.window_consumed = n;
+            } else {
+                s.window_consumed = s.window_consumed.saturating_add(n);
+            }
             Ok(())
         } else {
             let deficit = n_i64 - s.tokens;
@@ -88,6 +103,14 @@ impl TpmLimiter {
         let mut s = self.state.lock();
         Self::refill(&mut s, self.capacity);
         s.tokens -= n as i64;
+        // Track consumed in the current 60s window for accurate stats
+        let now = Instant::now();
+        if now.duration_since(s.window_start) > Duration::from_secs(60) {
+            s.window_start = now;
+            s.window_consumed = n;
+        } else {
+            s.window_consumed = s.window_consumed.saturating_add(n);
+        }
     }
 
     /// Текущий остаток токенов (может быть отрицательным при овердрафте).
@@ -95,6 +118,19 @@ impl TpmLimiter {
         let mut s = self.state.lock();
         Self::refill(&mut s, self.capacity);
         s.tokens
+    }
+
+    /// Консервативный remaining для stats: capacity минус consumed за последние 60 секунд.
+    /// Не зависит от refill — показывает реальное потребление за окно.
+    fn window_remaining(&self) -> i64 {
+        let mut s = self.state.lock();
+        let now = Instant::now();
+        // Expire old window
+        if now.duration_since(s.window_start) > Duration::from_secs(60) {
+            s.window_start = now;
+            s.window_consumed = 0;
+        }
+        (self.capacity as i64).saturating_sub(s.window_consumed as i64)
     }
 }
 
@@ -214,12 +250,14 @@ impl RateLimiterStore {
 
     /// Получить текущее состояние TPM: (limit, remaining).
     /// Возвращает (0, 0) если лимит не задан.
+    /// Использует window_remaining — capacity минус consumed за последние 60 секунд,
+    /// не зависит от bucket refill.
     pub fn get_tpm_state(&self, key: &str, tpm: u64) -> (u64, i64) {
         if tpm == 0 {
             return (0, 0);
         }
         let pair = self.get_or_create(key, 0, tpm);
-        let remaining = pair.tpm.remaining();
+        let remaining = pair.tpm.window_remaining();
         (tpm, remaining)
     }
 }

@@ -120,6 +120,7 @@ pub fn json_error(
     err_type: &str,
     code: &str,
 ) -> axum::response::Response {
+    use axum::http::header;
     use axum::response::IntoResponse;
     let body = serde_json::json!({
         "error": {
@@ -129,5 +130,18 @@ pub fn json_error(
             "code": code
         }
     });
-    (status, axum::Json(body)).into_response()
+    let body_str = serde_json::to_string(&body).unwrap_or_default();
+    let mut resp = axum::response::Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(body_str))
+        .unwrap_or_else(|_| (status, "internal error").into_response());
+
+    // Add WWW-Authenticate header for 401 responses (HTTP spec requirement)
+    if status == axum::http::StatusCode::UNAUTHORIZED {
+        resp.headers_mut()
+            .insert(header::WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+    }
+
+    resp
 }

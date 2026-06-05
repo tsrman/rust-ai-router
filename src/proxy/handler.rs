@@ -1242,60 +1242,263 @@ pub async fn proxy_generic(
     // Build URL: proxy path relative to endpoint base URL
     let upstream_url = format!("{}{}", current_endpoint.url.trim_end_matches('/'), req_path);
 
-    // Proxy raw (don't parse response — just forward)
+    // Proxy to upstream — then parse response for TPM consumption
     let start = std::time::Instant::now();
+    let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
+    let endpoint_limits_tpm = current_endpoint.endpoint_limits_tpm;
+
+    // Capture what we need for TPM accounting (moved out of async blocks)
+    let limits = state.limits.limiters.clone();
+    let cfg_for_tpm = state.config.load();
+    let team_limits_tpm = cfg_for_tpm.teams.iter().find(|t| t.name == auth.team)
+        .and_then(|t| t.limits.as_ref().map(|l| l.tpm)).unwrap_or(0);
+    let team_key = format!("team:{}", auth.team);
+    let token_key_for_tpm = auth.token_key.clone();
+    let token_tpm_for_tpm = auth.tpm as u64;
+    let ep_rl_key = format!("ep:{}", ep_key);
+
     let result = if is_stream {
-        proxy_streaming_forward(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &HashMap::new()).await
-    } else {
-        proxy_raw(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &content_type).await
-    };
-    match result {
-        Ok(resp) => {
-            let latency = start.elapsed();
-            let status = resp.status().as_u16();
-
-            // Fire-and-forget stats (minimal — no token counting)
-            let stats = state.monitoring.stats.clone();
-            let model = canonical_model.clone();
-            let ep_url = current_endpoint.url.clone();
-            let team_name = auth.team.clone();
-            let latency_ms = latency.as_millis() as u64;
-            tokio::spawn(async move {
-                stats.record_request(&model, &ep_url, &team_name, 0, 0, latency_ms, status, None, 0.0, 0.0).await;
-            });
-
-            let mut resp = resp;
-            let headers = resp.headers_mut();
-            insert_header(headers, "x-endpoint-used", &current_endpoint.url);
-            insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
-            insert_header(headers, "x-latency-ms", &latency_ms.to_string());
-
-            let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
-
-            // Record success/fail for fail2ban & health_store
-            if status >= 400 && state.limits.fail2ban.is_fail_status(status) {
-                state.limits.fail2ban.record_failure_with_code(&ep_key, status);
-                state.monitoring.health_store.record_error(&ep_key);
-            } else {
-                state.limits.fail2ban.record_success(&ep_key);
-                state.monitoring.health_store.record_request(&ep_key);
-                state.monitoring.health_store.record_latency(&ep_key, latency_ms);
+        // Streaming: parse SSE events for usage, then consume TPM
+        let body_value = match serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid JSON body: {e}"),
+                    "invalid_request_error",
+                    "body_parse_failed",
+                );
             }
+        };
 
-            resp
-        }
-        Err(e) => {
-            let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
-            state.limits.fail2ban.record_failure(&ep_key);
+        let upstream_resp = match state.client
+            .post(&upstream_url)
+            .header("Authorization", format!("Bearer {}", current_endpoint.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body_value)
+            .send().await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                state.limits.fail2ban.record_failure(&ep_key);
+                state.monitoring.health_store.record_error(&ep_key);
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "bad_gateway",
+                    "upstream_network_error",
+                );
+            }
+        };
+        let status = upstream_resp.status();
+
+        if !status.is_success() {
+            let latency = start.elapsed();
+            let latency_ms = latency.as_millis() as u64;
+            state.limits.fail2ban.record_failure_with_code(&ep_key, status.as_u16());
             state.monitoring.health_store.record_error(&ep_key);
-            json_error(
-                StatusCode::BAD_GATEWAY,
-                &format!("Upstream error: {e}"),
-                "bad_gateway",
-                "upstream_network_error",
-            )
+            let err_body = upstream_resp.text().await.unwrap_or_default();
+            let mut resp = (status, err_body).into_response();
+            resp.headers_mut().insert("content-type", "application/json".parse().unwrap());
+            return resp;
         }
-    }
+
+        // Stream with SSE usage parsing
+        // Capture headers before consuming the response body
+        let resp_headers = upstream_resp.headers().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(64);
+        tokio::spawn({
+            let limiters = limits.clone();
+            async move {
+                let mut usage_prompt = 0u64;
+                let mut usage_completion = 0u64;
+                let mut buffer = Vec::new();
+
+                let mut byte_stream = upstream_resp.bytes_stream();
+                while let Some(chunk) = byte_stream.next().await {
+                    match &chunk {
+                        Ok(bytes) => {
+                            buffer.extend_from_slice(bytes);
+                            while let Some(pos) = find_double_newline(&buffer) {
+                                let event_bytes = buffer[..pos].to_vec();
+                                buffer.drain(..pos + 2);
+
+                                let event_str = String::from_utf8_lossy(&event_bytes);
+                                for line in event_str.lines() {
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                                            if let Some(usage) = json.get("usage") {
+                                                if let Some(p) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                                                    usage_prompt = p;
+                                                }
+                                                if let Some(c) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                                                    usage_completion = c;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    let _ = tx.send(chunk.map_err(|e| panic!("unexpected error: {e}"))).await;
+                }
+
+                let total = usage_prompt.saturating_add(usage_completion);
+                if total > 1 {
+                    if team_limits_tpm > 0 {
+                        limiters.consume_tpm(&team_key, team_limits_tpm, total - 1);
+                    }
+                    if token_tpm_for_tpm > 0 {
+                        limiters.consume_tpm(&token_key_for_tpm, token_tpm_for_tpm, total - 1);
+                    }
+                    if endpoint_limits_tpm > 0 {
+                        limiters.consume_tpm(&ep_rl_key, endpoint_limits_tpm, total - 1);
+                    }
+                }
+            }
+        });
+
+        let latency = start.elapsed();
+        let latency_ms = latency.as_millis() as u64;
+
+        let mut response = Response::builder().status(status);
+        // Forward headers (skip hop-by-hop)
+        for (key, val) in resp_headers.iter() {
+            if key != "transfer-encoding" && key != "content-encoding"
+                && key != "content-length" && key != "connection" && key != "keep-alive"
+            {
+                if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    if let Some(hdr) = response.headers_mut() {
+                        hdr.insert(name, val.clone());
+                    }
+                }
+            }
+        }
+
+        let client_stream = ReceiverStream::new(rx);
+        let mut resp = response.body(Body::from_stream(client_stream)).unwrap_or_else(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        });
+
+        // Post-processing
+        state.limits.fail2ban.record_success(&ep_key);
+        state.monitoring.health_store.record_request(&ep_key);
+        state.monitoring.health_store.record_latency(&ep_key, latency_ms);
+        state.live_stats.record_request(&auth.token_key, &auth.team, &ep_key);
+
+        let headers = resp.headers_mut();
+        insert_header(headers, "x-endpoint-used", &current_endpoint.url);
+        insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
+        insert_header(headers, "x-latency-ms", &latency_ms.to_string());
+
+        resp
+    } else {
+        // Non-streaming: read body, parse usage, consume TPM, rebuild response
+        let mut resp = match proxy_raw(&state.client, &upstream_url, &current_endpoint.api_key, &body_bytes, &content_type).await {
+            Ok(r) => r,
+            Err(e) => {
+                state.limits.fail2ban.record_failure(&ep_key);
+                state.monitoring.health_store.record_error(&ep_key);
+                return json_error(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "bad_gateway",
+                    "upstream_network_error",
+                );
+            }
+        };
+
+        let latency = start.elapsed();
+        let status = resp.status().as_u16();
+
+        // Read the response body to extract usage data
+        let resp_body_bytes = axum::body::to_bytes(
+            std::mem::replace(resp.body_mut(), axum::body::Body::empty()),
+            1024 * 1024,
+        ).await.unwrap_or_default();
+
+        // Parse JSON response for usage
+        let upstream_json = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes).ok();
+        let (tokens_prompt, tokens_completion) = upstream_json
+            .as_ref()
+            .and_then(|v| {
+                let usage = v.get("usage")?;
+                let prompt = usage.get("prompt_tokens")
+                    .or_else(|| usage.get("input_tokens"))
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                let completion = usage.get("completion_tokens")
+                    .or_else(|| usage.get("output_tokens"))
+                    .and_then(|v| v.as_u64()).unwrap_or(0);
+                Some((prompt, completion))
+            })
+            .unwrap_or((0, 0));
+
+        // Consume TPM based on actual usage
+        let total_tokens = tokens_prompt.saturating_add(tokens_completion);
+        if total_tokens > 1 {
+            if team_limits_tpm > 0 {
+                limits.consume_tpm(&team_key, team_limits_tpm, total_tokens - 1);
+            }
+            if token_tpm_for_tpm > 0 {
+                limits.consume_tpm(&token_key_for_tpm, token_tpm_for_tpm, total_tokens - 1);
+            }
+            if endpoint_limits_tpm > 0 {
+                limits.consume_tpm(&ep_rl_key, endpoint_limits_tpm, total_tokens - 1);
+            }
+        }
+
+        let latency_ms = latency.as_millis() as u64;
+
+        // Record stats with actual token counts
+        let stats = state.monitoring.stats.clone();
+        let model = canonical_model.clone();
+        let ep_url = current_endpoint.url.clone();
+        let team_name = auth.team.clone();
+        let cp = current_endpoint.cost_prompt;
+        let cc = current_endpoint.cost_completion;
+        tokio::spawn(async move {
+            stats.record_request(&model, &ep_url, &team_name, tokens_prompt, tokens_completion, latency_ms, status, None, cp, cc).await;
+        });
+
+        if status >= 400 && state.limits.fail2ban.is_fail_status(status) {
+            state.limits.fail2ban.record_failure_with_code(&ep_key, status);
+            state.monitoring.health_store.record_error(&ep_key);
+        } else {
+            state.limits.fail2ban.record_success(&ep_key);
+            state.monitoring.health_store.record_request(&ep_key);
+            state.monitoring.health_store.record_latency(&ep_key, latency_ms);
+        }
+        state.live_stats.record_request(&auth.token_key, &auth.team, &ep_key);
+
+        // Rebuild response with original body
+        let mut resp_builder = Response::builder().status(status);
+        for (key, val) in resp.headers().iter() {
+            if key != "transfer-encoding" && key != "content-encoding"
+                && key != "content-length" && key != "connection" && key != "keep-alive"
+            {
+                if let Ok(name) = header::HeaderName::from_bytes(key.as_str().as_bytes()) {
+                    if let Some(hdr) = resp_builder.headers_mut() {
+                        hdr.insert(name, val.clone());
+                    }
+                }
+            }
+        }
+
+        let mut resp = resp_builder.body(Body::from(resp_body_bytes)).unwrap_or_else(|_| {
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to build response").into_response()
+        });
+
+        let headers = resp.headers_mut();
+        insert_header(headers, "x-endpoint-used", &current_endpoint.url);
+        insert_header(headers, "x-endpoint-index", &current_endpoint.index.to_string());
+        insert_header(headers, "x-latency-ms", &latency_ms.to_string());
+
+        resp
+    };
+
+    result
 }
 
 /// Proxy raw bytes to upstream (no JSON parsing, no OpenAI-specific logic)
@@ -1624,5 +1827,55 @@ mod path_tests {
             strip_base_path("/rustrouter/v1/models?details=true", "rustrouter"),
             "/v1/models?details=true"
         );
+    }
+}
+
+#[cfg(test)]
+mod base_path_integration_tests {
+    use super::*;
+    use axum::{body::Body as AxumBody, http::{Request, StatusCode}, routing::{get, post}, Router};
+
+    async fn echo_orig(
+        OriginalUri(original_uri): OriginalUri,
+        req: Request<AxumBody>,
+    ) -> String {
+        format!("orig={}, req={}", original_uri.path(), req.uri().path())
+    }
+
+    #[tokio::test]
+    async fn test_prefixed_routes_with_fallback() {
+        // Replicate the new approach: prefix all routes with base_path,
+        // fallback catches non-matching paths under the same router.
+        let bp = "/rustrouter";
+        let v1_prefix = format!("{}{}", bp, "/v1");
+        
+        let v1_routes = Router::new()
+            .route(&format!("{}{}", v1_prefix, "/chat/completions"), post(|| async { "chat" }))
+            .fallback(echo_orig);
+
+        let app = Router::new()
+            .route(&format!("{}{}", bp, "/health"), get(|| async { "health" }))
+            .merge(v1_routes);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let client = reqwest::Client::new();
+
+        // Test: POST /rustrouter/v1/embeddings (fallback)
+        let resp = client.post(format!("http://{}/rustrouter/v1/embeddings", addr))
+            .body("{}").send().await.unwrap();
+        let status = resp.status();
+        let body = resp.text().await.unwrap();
+        println!("embeddings - Status: {}, Body: {}", status, body);
+        assert_eq!(status, StatusCode::OK, "Fallback should be reached");
+        assert!(body.contains("orig=/rustrouter/v1/embeddings"));
+
+        // Test: GET /rustrouter/health (explicit route)
+        let resp = client.get(format!("http://{}/rustrouter/health", addr)).send().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.text().await.unwrap(), "health");
     }
 }

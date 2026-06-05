@@ -1,6 +1,6 @@
 //! Фоновая проверка доступности ВСЕХ эндпоинтов.
 //!
-//! Раз в `interval_secs` отправляет лёгкий запрос (`GET /v1/models`) на каждый
+//! Раз в `interval_secs` отправляет лёгкий запрос (`GET /health`) на каждый
 //! эндпоинт. Результат сохраняется в `HealthStore` для дашборда.
 //! При успешном ответе на забаненный эндпоинт — снимает бан.
 //! При ошибке на незабаненный — записывает failure (может привести к бану).
@@ -145,7 +145,7 @@ async fn check_all_endpoints(
     for model in &cfg.models {
         for ep in &model.endpoints {
             let ep_key = format!("{}:{}", ep.url, mask_key(&ep.key));
-            let probe_url = format!("{}/v1/models", ep.url.trim_end_matches('/'));
+            let probe_url = format!("{}/health", ep.url.trim_end_matches('/'));
 
             match client
                 .get(&probe_url)
