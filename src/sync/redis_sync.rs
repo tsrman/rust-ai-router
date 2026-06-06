@@ -12,13 +12,13 @@ pub struct SyncStore {
 
 #[allow(dead_code)]
 impl SyncStore {
-    /// No-op экземпляр (sync не подключён)
+    /// No-op instance (sync not connected)
     #[allow(dead_code)]
     pub fn new() -> Self {
         Self { conn: None, prefix: String::new() }
     }
 
-    /// Подключиться к Redis/Valkey (standalone или sentinel)
+    /// Connect to Redis/Valkey (standalone or sentinel)
     pub async fn connect(cfg: &crate::config::SyncConfig) -> Result<Self, String> {
         if cfg.mode == "sentinel" || !cfg.sentinel_nodes.is_empty() {
             Self::connect_sentinel(cfg).await

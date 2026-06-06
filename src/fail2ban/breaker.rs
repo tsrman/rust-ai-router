@@ -2,23 +2,23 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Состояние одного эндпоинта
+/// State of a single endpoint
 struct EndpointState {
     consecutive_failures: AtomicU32,
     total_requests: AtomicU64,
     total_failures: AtomicU64,
     banned_until: parking_lot::Mutex<Option<Instant>>,
-    /// Код последней ошибки (HTTP status или 0 для network error)
+    /// Last error code (HTTP status or 0 for network error)
     last_error_code: parking_lot::Mutex<u16>,
 }
 
-/// Circuit breaker / fail2ban для эндпоинтов
+/// Circuit breaker / fail2ban for endpoints
 pub struct Fail2ban {
     states: DashMap<String, EndpointState>,
     max_failures: u32,
     ban_duration: Duration,
     error_threshold: f64,
-    /// Паттерны HTTP-статусов, считающихся ошибкой: "5xx", "500", "429", etc.
+    /// HTTP status patterns considered errors: "5xx", "500", "429", etc.
     fail_patterns: Vec<FailPattern>,
 }
 
@@ -45,16 +45,16 @@ impl Fail2ban {
         }
     }
 
-    /// Проверить, не забанен ли эндпоинт
+    /// Check if an endpoint is banned
     pub fn is_banned(&self, endpoint_key: &str) -> bool {
         if let Some(state) = self.states.get(endpoint_key) {
-            // Держим один lock на всю проверку — предотвращает TOCTOU
+            // Hold one lock for the entire check — prevents TOCTOU
             let mut banned = state.banned_until.lock();
             if let Some(until) = *banned {
                 if Instant::now() < until {
                     return true;
                 }
-                // Истёк — сбрасываем
+                // Expired — reset
                 state.consecutive_failures.store(0, Ordering::Relaxed);
                 *banned = None;
             }
@@ -62,7 +62,7 @@ impl Fail2ban {
         false
     }
 
-    /// Проверить, является ли HTTP-статус ошибкой согласно паттернам
+    /// Check if an HTTP status is an error according to patterns
     pub fn is_fail_status(&self, status: u16) -> bool {
         if self.fail_patterns.is_empty() {
             return false;
@@ -73,19 +73,19 @@ impl Fail2ban {
         })
     }
 
-    /// Записать успешный запрос
+    /// Record a successful request
     pub fn record_success(&self, endpoint_key: &str) {
         let state = self.ensure(endpoint_key);
         state.total_requests.fetch_add(1, Ordering::Relaxed);
         state.consecutive_failures.store(0, Ordering::Relaxed);
     }
 
-    /// Записать ошибку и проверить, нужно ли банить
+    /// Record an error and check if banning is needed
     pub fn record_failure(&self, endpoint_key: &str) -> bool {
         self.record_failure_with_code(endpoint_key, 0)
     }
 
-    /// Записать ошибку с HTTP-кодом (0 = сетевая ошибка)
+    /// Record an error with HTTP code (0 = network error)
     pub fn record_failure_with_code(&self, endpoint_key: &str, status_code: u16) -> bool {
         let state = self.ensure(endpoint_key);
         state.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -131,7 +131,7 @@ impl Fail2ban {
         }
     }
 
-    /// Количество забаненных эндпоинтов (для Prometheus gauge)
+    /// Number of banned endpoints (for Prometheus gauge)
     pub fn banned_count(&self) -> i64 {
         self.states
             .iter()
@@ -142,7 +142,7 @@ impl Fail2ban {
             .count() as i64
     }
 
-    /// Причина бана для эндпоинта (None = не забанен)
+    /// Ban reason for an endpoint (None = not banned)
     pub fn ban_reason(&self, endpoint_key: &str) -> Option<String> {
         let state = self.states.get(endpoint_key)?;
         let banned = {
@@ -171,7 +171,7 @@ impl Fail2ban {
     }
 }
 
-/// Парсинг паттернов: "5xx" → 500-599, "429" → точный 429
+/// Pattern parsing: "5xx" → 500-599, "429" → exact 429
 fn parse_fail_patterns(codes: &[String]) -> Vec<FailPattern> {
     codes
         .iter()

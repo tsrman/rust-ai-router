@@ -28,7 +28,7 @@ use router::{ModelRouter, SessionStickyStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // ── CLI аргументы ──────────────────────────────────────────────────
+    // ── CLI arguments ──────────────────────────────────────────────────
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     args.retain(|a| a != "--verbose" && a != "-v");
@@ -40,14 +40,14 @@ async fn main() -> anyhow::Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config.yaml"));
 
-    // ── Логгирование ───────────────────────────────────────────────────
+    // ── Logging ────────────────────────────────────────────────────────
     let default_level = if verbose { "debug" } else { "info" };
     let env_filter = EnvFilter::try_from_env("RUST_LOG")
         .unwrap_or_else(|_| EnvFilter::new(default_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(false)       // убираем module path для компактности
+        .with_target(false)       // remove module path for compactness
         .with_thread_ids(false)
         .with_line_number(false)
         .with_file(false)
@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
         "openai-router starting"
     );
 
-    // ── Загрузка конфига ───────────────────────────────────────────────
+    // ── Config loading ─────────────────────────────────────────────────
     tracing::info!(config = %config_path.display(), "Loading config");
 
     let config = config::watcher::watch_config(config_path.clone()).await?;
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         "Timeouts"
     );
 
-    // ── HTTP клиент ────────────────────────────────────────────────────
+    // ── HTTP client ────────────────────────────────────────────────────
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(timeouts.upstream_connect_secs))
         .timeout(Duration::from_secs(timeouts.upstream_read_secs))
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         .pool_idle_timeout(Duration::from_secs(timeouts.client_idle_secs))
         .build()?;
 
-    // ── Компоненты ─────────────────────────────────────────────────────
+    // ── Components ─────────────────────────────────────────────────────
     let mdl_router = ModelRouter::new(config.clone());
     let rate_limiters = Arc::new(ratelimit::RateLimiterStore::new());
     ratelimit::RateLimiterStore::start_cleanup(rate_limiters.clone());
@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     ));
     let sticky = SessionStickyStore::new(cfg.session.sticky_ttl_secs);
 
-    // ── Фоновая проверка эндпоинтов ────────────────────────────────────
+    // ── Background endpoint health checks ──────────────────────────────
     let health_check_interval = cfg.fail2ban.health_check_interval_secs;
     let health_store = Arc::new(health::checker::HealthStore::new());
     let health_check_client = reqwest::Client::builder()
@@ -200,9 +200,9 @@ async fn main() -> anyhow::Result<()> {
             },
         );
 
-    // ── Health routes (root, без auth) ──────────────────────────────────
+    // ── Health routes (root, no auth) ──────────────────────────────────
     
-    // ── Монтирование ────────────────────────────────────────────────────
+    // ── Mounting ────────────────────────────────────────────────────────
     // When base_path is set, we prefix all route paths to avoid axum 0.7's
     // double-nesting + fallback bug (outer .nest() + inner .nest() + .fallback() = 404).
     // All routes are registered at the top level with full paths.
@@ -224,10 +224,10 @@ async fn main() -> anyhow::Result<()> {
         .route(&format!("{}{}", v1_prefix, "/completions"), post(proxy::handler::proxy_handler))
         .route(&format!("{}{}", v1_prefix, "/messages"), post(proxy::handler::proxy_handler))
         .route(&format!("{}{}", v1_prefix, "/models"), get(list_models))
-        // Fallback: любые другие v1-эндпоинты (embeddings, rerank, tokenize, etc.)
+        // Fallback: any other v1 endpoints (embeddings, rerank, tokenize, etc.)
         .fallback(proxy::handler::proxy_generic);
 
-    // ── Роутер ─────────────────────────────────────────────────────────
+    // ── Router ─────────────────────────────────────────────────────────
     let mut api_routes = Router::new()
         .route(&format!("{}{}", bp, "/health"), get(health::dashboard::health_json))
         .route(&format!("{}{}", bp, "/vhealth"), get(health::dashboard::health_dashboard))
@@ -248,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(trace_layer)
         .layer(cors);
 
-    // Таймаут на полный цикл запроса
+    // Timeout for the full request cycle
     if timeouts.client_read_secs > 0 {
         api_routes = api_routes.layer(middleware::from_fn_with_state(
             Duration::from_secs(timeouts.client_read_secs),
@@ -303,7 +303,7 @@ async fn list_models(
 
     let cfg = state.config.load();
 
-    // Rate limiting: команда → токен
+    // Rate limiting: team → token
     if let Some(rl_resp) = proxy::handler::check_all_rate_limits(
         &state, &cfg, &auth.team, &auth.token_key, auth.rpm, auth.tpm
     ).await {

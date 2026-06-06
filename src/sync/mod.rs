@@ -1,11 +1,11 @@
-//! Синхронизация между экземплярами через Redis/Valkey (опционально).
+//! Synchronization between instances via Redis/Valkey (optional).
 
 #[cfg(feature = "redis-sync")]
 mod redis_sync;
 #[cfg(feature = "redis-sync")]
 pub use redis_sync::*;
 
-/// Заглушка (no-op) когда redis-sync не включён
+/// No-op stub when redis-sync is not enabled
 #[cfg(not(feature = "redis-sync"))]
 pub struct SyncStore;
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::config::{AppConfig, EndpointConfig};
 
-/// Результат выбора эндпоинта
+/// Endpoint selection result
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct SelectedEndpoint {
@@ -20,7 +20,7 @@ pub struct SelectedEndpoint {
     pub endpoint_limits_tpm: u64,
 }
 
-/// Счётчики для round-robin per model
+/// Round-robin counters per model
 pub struct RoundRobinCounters {
     counters: DashMap<String, AtomicU64>,
 }
@@ -36,7 +36,7 @@ impl RoundRobinCounters {
     }
 }
 
-/// Роутер моделей: weighted round-robin + session sticky
+/// Model router: weighted round-robin + session sticky
 pub struct ModelRouter {
     config: Arc<ArcSwap<AppConfig>>,
     round_robin: RoundRobinCounters,
@@ -50,7 +50,7 @@ impl ModelRouter {
         }
     }
 
-    /// Выбрать эндпоинт через weighted round-robin
+    /// Select an endpoint via weighted round-robin
     #[allow(dead_code)]
     pub fn select_endpoint(&self, model_name: &str) -> Option<SelectedEndpoint> {
         let cfg = self.config.load();
@@ -63,7 +63,7 @@ impl ModelRouter {
         self.pick_weighted(&model.name, &model.endpoints)
     }
 
-    /// Выбрать доступный эндпоинт, пропуская забаненные и уже опробованные.
+    /// Select an available endpoint, skipping banned and already tried ones.
     pub fn select_available(
         &self,
         model_name: &str,
@@ -79,7 +79,7 @@ impl ModelRouter {
             return None;
         }
 
-        // Пробуем до total раз — по одному проходу round-robin
+        // Try up to total times — one round-robin pass
         let start = self.round_robin.next(&model.name, total);
         for offset in 0..total {
             let idx = (start + offset) % total;
@@ -105,33 +105,33 @@ impl ModelRouter {
         None
     }
 
-    /// Выбрать эндпоинт с session-sticky привязкой (с учётом весов)
+    /// Select an endpoint with session-sticky affinity (considering weights)
     #[allow(dead_code)]
     pub fn select_sticky(&self, model_name: &str, session_id: &str) -> Option<SelectedEndpoint> {
         let cfg = self.config.load();
         let model = cfg.find_model(model_name)?;
 
-        // Используем хеш session_id для детерминированного выбора
+        // Use session_id hash for deterministic selection
         let hash = session_id.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
         self.pick_weighted_with_offset(&model.name, &model.endpoints, hash as usize)
     }
 
-    /// Взвешенный round-robin
+    /// Weighted round-robin
     fn pick_weighted(&self, model_name: &str, endpoints: &[EndpointConfig]) -> Option<SelectedEndpoint> {
         let total = endpoints.len();
         let idx = self.round_robin.next(model_name, total);
         self.build_selected(endpoints, idx, total)
     }
 
-    /// Взвешенный выбор со смещением (для sticky)
+    /// Weighted selection with offset (for sticky)
     fn pick_weighted_with_offset(&self, _model_name: &str, endpoints: &[EndpointConfig], offset: usize) -> Option<SelectedEndpoint> {
         let total = endpoints.len();
         if total == 0 {
             return None;
         }
 
-        // Учитываем веса: endpoint с weight=0 пропускаем
+        // Consider weights: skip endpoints with weight=0
         let weights: Vec<usize> = endpoints.iter()
             .map(|ep| if ep.weight == 0 { 1 } else { ep.weight } as usize)
             .collect();

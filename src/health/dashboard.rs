@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::auth::AuthContext;
 use crate::proxy::handler::AppState;
 
-/// GET /health — JSON статус
+/// GET /health — JSON status
 pub async fn health_json(
     State(state): State<Arc<AppState>>,
 ) -> Json<serde_json::Value> {
@@ -54,7 +54,7 @@ pub async fn health_json(
     }))
 }
 
-/// GET /vhealth — HTML дашборд
+/// GET /vhealth — HTML dashboard
 pub async fn health_dashboard(
     State(state): State<Arc<AppState>>,
 ) -> Html<String> {
@@ -209,7 +209,7 @@ pub async fn health_dashboard(
     ))
 }
 
-/// GET /stats — статистика по токену/команде (admin видит всё)
+/// GET /stats — token/team statistics (admin sees everything)
 pub async fn stats_json(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

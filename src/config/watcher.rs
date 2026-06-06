@@ -8,8 +8,8 @@ use tokio::sync::mpsc;
 
 use super::types::AppConfig;
 
-/// Запустить отслеживание изменений конфиг-файла.
-/// Возвращает `Arc<ArcSwap<AppConfig>>` для lock-free чтения актуального конфига.
+/// Start watching the config file for changes.
+/// Returns `Arc<ArcSwap<AppConfig>>` for lock-free reading of the current config.
 pub async fn watch_config(config_path: PathBuf) -> Result<Arc<ArcSwap<AppConfig>>> {
     let initial = super::loader::load_config(&config_path)?;
     let config: Arc<ArcSwap<AppConfig>> = Arc::new(ArcSwap::from_pointee(initial));
@@ -45,13 +45,13 @@ pub async fn watch_config(config_path: PathBuf) -> Result<Arc<ArcSwap<AppConfig>
         RecursiveMode::NonRecursive,
     )?;
 
-    // Фоновый таск: перезагружает конфиг при изменении файла
+    // Background task: reload config when the file changes
     tokio::spawn(async move {
-        // watcher должен жить пока работает этот таск
+        // watcher must live as long as this task
         let _watcher = watcher;
 
         while rx.recv().await.is_some() {
-            // Небольшая задержка — даём ОС дописать файл
+            // Small delay — let the OS finish writing the file
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
             match super::loader::load_config(&reloader_path) {

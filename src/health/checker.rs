@@ -1,9 +1,9 @@
-//! Фоновая проверка доступности ВСЕХ эндпоинтов.
+//! Background availability check for ALL endpoints.
 //!
-//! Раз в `interval_secs` отправляет лёгкий запрос (`GET /health`) на каждый
-//! эндпоинт. Результат сохраняется в `HealthStore` для дашборда.
-//! При успешном ответе на забаненный эндпоинт — снимает бан.
-//! При ошибке на незабаненный — записывает failure (может привести к бану).
+//! Every `interval_secs` sends a lightweight request (`GET /health`) to each
+//! endpoint. Result is saved to `HealthStore` for the dashboard.
+//! On successful response from a banned endpoint — unbans it.
+//! On error from an unbanned endpoint — records failure (may lead to ban).
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -16,7 +16,7 @@ use crate::config::AppConfig;
 use crate::fail2ban::Fail2ban;
 use crate::utils::mask_key;
 
-/// Состояние одного эндпоинта
+/// State of a single endpoint
 #[derive(Debug, Clone)]
 pub struct EndpointHealth {
     pub healthy: bool,
@@ -27,7 +27,7 @@ pub struct EndpointHealth {
     pub error_count: u64,
 }
 
-/// Хранилище статусов здоровья эндпоинтов (ключ = "url:masked_key")
+/// Endpoint health status store (key = "url:masked_key")
 #[derive(Default)]
 pub struct HealthStore {
     states: DashMap<String, EndpointHealth>,
@@ -105,7 +105,7 @@ impl HealthStore {
     }
 }
 
-/// Запустить фоновый health checker.
+/// Start the background health checker.
 pub fn start_background_health_checker(
     config: Arc<ArcSwap<AppConfig>>,
     fail2ban: Arc<Fail2ban>,
@@ -126,7 +126,7 @@ pub fn start_background_health_checker(
 
         loop {
             check_all_endpoints(&config, &fail2ban, &health_store, &client).await;
-            // Обновляем Prometheus gauge
+            // Update Prometheus gauge
             let count = fail2ban.banned_count();
             crate::metrics::prometheus::BANNED_ENDPOINTS.set(count);
             tokio::time::sleep(interval).await;

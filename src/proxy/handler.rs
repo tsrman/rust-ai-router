@@ -22,26 +22,26 @@ use crate::router::{ModelRouter, SelectedEndpoint, SessionStickyStore};
 use crate::stats::StatsWriter;
 use crate::utils::json_error;
 
-/// Состояние rate-limiting (локальный governor + sync Redis)
+/// Rate-limiting state (local governor + sync Redis)
 pub struct RateLimitState {
     pub limiters: Arc<RateLimiterStore>,
     pub fail2ban: Arc<Fail2ban>,
     pub sync: Arc<crate::sync::SyncStore>,
 }
 
-/// Состояние sticky-сессий
+/// Sticky-session state
 pub struct SessionState {
     pub sticky: SessionStickyStore,
     pub sticky_ttl_secs: u64,
 }
 
-/// Состояние мониторинга (статистика + health check)
+/// Monitoring state (stats + health check)
 pub struct MonitoringState {
     pub stats: Arc<StatsWriter>,
     pub health_store: Arc<HealthStore>,
 }
 
-/// Живая статистика по токенам, командам и эндпоинтам
+/// Live stats by token, team and endpoint
 #[derive(Default)]
 pub struct LiveStats {
     pub requests_total: std::sync::atomic::AtomicU64,
@@ -68,7 +68,7 @@ impl LiveStats {
     }
 }
 
-/// Общее состояние приложения
+/// Global application state
 pub struct AppState {
     pub config: Arc<ArcSwap<AppConfig>>,
     pub client: Client,
@@ -80,27 +80,27 @@ pub struct AppState {
     pub base_path: String,
 }
 
-/// Нормализовать JSON-ответ от upstream к строгому OpenAI-формату.
-/// Удаляет нестандартные поля (vLLM-расширения) и заменяет model на запрошенное имя.
+/// Normalize upstream JSON response to strict OpenAI format.
+/// Removes non-standard fields (vLLM extensions) and replaces model with the requested name.
 fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &str) {
     if let Some(obj) = value.as_object_mut() {
-        // Заменяем model на запрошенное имя (как делает LiteLLM)
+        // Replace model with the requested name (like LiteLLM does)
         obj.insert("model".to_string(), serde_json::Value::String(requested_model.to_string()));
 
-        // Удаляем нестандартные поля на корневом уровне
+        // Remove non-standard fields at root level
         for key in &["prompt_logprobs", "prompt_token_ids", "kv_transfer_params"] {
             obj.remove(*key);
         }
 
-        // Нормализуем choices
+        // Normalize choices
         if let Some(choices) = obj.get_mut("choices").and_then(|v| v.as_array_mut()) {
             for choice in choices.iter_mut() {
                 if let Some(choice_obj) = choice.as_object_mut() {
-                    // Удаляем нестандартные поля choice
+                    // Remove non-standard choice fields
                     for key in &["stop_reason", "token_ids", "provider_specific_fields"] {
                         choice_obj.remove(*key);
                     }
-                    // Удаляем нестандартные поля внутри message
+                    // Remove non-standard fields inside message
                     if let Some(msg) = choice_obj.get_mut("message").and_then(|v| v.as_object_mut()) {
                         msg.remove("provider_specific_fields");
                     }
@@ -110,7 +110,7 @@ fn normalize_openai_response(value: &mut serde_json::Value, requested_model: &st
     }
 }
 
-/// Убрать base_path из оригинального URI, оставив только путь после него.
+/// Strip base_path from the original URI, leaving only the path after it.
 fn strip_base_path(path: &str, base_path: &str) -> String {
     let bp = base_path.trim_start_matches('/').trim_end_matches('/');
     if bp.is_empty() {
@@ -122,7 +122,7 @@ fn strip_base_path(path: &str, base_path: &str) -> String {
     }
 }
 
-/// Основной обработчик проксирования /v1/chat/completions etc.
+/// Main proxy handler for /v1/chat/completions etc.
 pub async fn proxy_handler(
     State(state): State<Arc<AppState>>,
     OriginalUri(original_uri): OriginalUri,
@@ -130,7 +130,7 @@ pub async fn proxy_handler(
 ) -> Response {
     let path = strip_base_path(original_uri.path(), &state.base_path);
 
-    // Аутентификация
+    // Authentication
     let auth = req.extensions().get::<AuthContext>().cloned();
     let (token_key, team, _cost_multiplier, token_rpm, token_tpm) = match &auth {
         Some(ctx) => (ctx.token_key.clone(), ctx.team.clone(), ctx.cost_multiplier, ctx.rpm, ctx.tpm),
@@ -148,7 +148,7 @@ pub async fn proxy_handler(
     let request_id = uuid::Uuid::new_v4().to_string();
     tracing::info!(%request_id, token = %mask_key(&token_key), team = %team, "Request");
 
-    // Извлекаем заголовки до перемещения req
+    // Extract headers before moving req
     let forwarded_headers = {
         let h = req.headers();
         let mut map = HashMap::new();
@@ -160,7 +160,7 @@ pub async fn proxy_handler(
         map
     };
 
-    // Читаем тело и парсим JSON
+    // Read body and parse JSON
     let (body_bytes, body_json) = match read_body_and_parse(req).await {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -177,7 +177,7 @@ pub async fn proxy_handler(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Anthropic → OpenAI трансляция
+    // Anthropic → OpenAI translation
     let is_anthropic = crate::proxy::anthropic::is_anthropic_request(&path);
     let upstream_path = if is_anthropic {
         "/v1/chat/completions"
@@ -192,7 +192,7 @@ pub async fn proxy_handler(
         (body_bytes, body_json, model_name)
     };
 
-    // Каноническое имя модели + алиас → подмена в теле
+    // Canonical model name + alias → replace in body
     let cfg = state.config.load();
     let canonical_model = cfg.canonical_model_name(&model_name);
     let team_tpm = cfg.teams.iter().find(|t| t.name == team)
@@ -206,7 +206,7 @@ pub async fn proxy_handler(
         body_bytes
     };
 
-    // Проверка доступа
+    // Access check
     if !cfg.token_has_model_access(&token_key, &canonical_model) {
         tracing::warn!(%request_id, token = %mask_key(&token_key), model = %canonical_model, "Forbidden: token has no model access");
         state.live_stats.record_error(&token_key, &team, "forbidden");
@@ -221,7 +221,7 @@ pub async fn proxy_handler(
         );
     }
 
-    // Собираем список забаненных ключей (один раз для модели, локально + sync)
+    // Collect banned keys (once per model, local + sync)
     let model_cfg = cfg.find_model(&canonical_model);
     let mut banned_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     if let Some(ref m) = model_cfg {
@@ -233,7 +233,7 @@ pub async fn proxy_handler(
         }
     }
 
-    // Если все эндпоинты модели забанены — сразу 503
+    // If all model endpoints are banned — return 503 immediately
     if model_cfg.as_ref().map_or(false, |m| {
         m.endpoints.len() == banned_keys.len() && m.endpoints.len() > 0
     }) {
@@ -250,10 +250,10 @@ pub async fn proxy_handler(
         );
     }
 
-    // Session-sticky routing: проверяем бан (локально + sync)
+    // Session-sticky routing: check ban (local + sync)
     let session_id = get_session_id(&body_bytes);
     let endpoint = if let Some(sid) = &session_id {
-        // Пробуем локальный sticky, затем sync (Redis)
+        // Try local sticky first, then sync (Redis)
         let mut sticky_idx = state.session.sticky.get(sid);
         if sticky_idx.is_none() {
             sticky_idx = state.limits.sync.get_sticky(sid).await;
@@ -267,7 +267,7 @@ pub async fn proxy_handler(
                         state.session.sticky.touch(sid);
                         Some(build_selected_endpoint(ep, sticky_idx, m.endpoints.len()))
                     } else {
-                        // Sticky endpoint забанен — очищаем привязку
+                        // Sticky endpoint banned — clear affinity
                         tracing::debug!(
                             sticky_idx,
                             "Sticky endpoint banned, falling back to round-robin"
@@ -287,7 +287,7 @@ pub async fn proxy_handler(
         None
     };
 
-    // Fallback: round-robin с пропуском забаненных
+    // Fallback: round-robin skipping banned endpoints
     let initial_endpoint = endpoint.or_else(|| {
         state.router.select_available(&canonical_model, &banned_keys, &std::collections::HashSet::new())
     });
@@ -309,7 +309,7 @@ pub async fn proxy_handler(
         }
     };
 
-    // Rate limiting: команда (общий бюджет) → токен (персональный)
+    // Rate limiting: team (shared budget) → token (personal)
     if let Some(rl_resp) = check_all_rate_limits(
         &state, &cfg, &team, &token_key, token_rpm, token_tpm
     ).await {
@@ -318,7 +318,7 @@ pub async fn proxy_handler(
         return rl_resp;
     }
 
-    // ── Ретрай-луп ──────────────────────────────────────────────────
+    // ── Retry loop ────────────────────────────────────────────────────
     let retry_on_failure = cfg.fail2ban.retry_on_failure;
     let mut tried_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_error_response: Option<Response> = None;
@@ -328,7 +328,7 @@ pub async fn proxy_handler(
         let ep_key = format!("{}:{}", current_endpoint.url, mask_key(&current_endpoint.api_key));
         let masked_ep_key = format!("{}:{}", crate::utils::mask_endpoint_url(&current_endpoint.url), mask_key(&current_endpoint.api_key));
 
-        // Rate limiting: эндпоинт (sync → локальный)
+        // Rate limiting: endpoint (sync → local)
         if current_endpoint.endpoint_limits_rpm > 0 || current_endpoint.endpoint_limits_tpm > 0 {
             let ep_rl_key = format!("ep:{}", ep_key);
 
@@ -359,12 +359,12 @@ pub async fn proxy_handler(
                 ratelimit::RateLimitScope::Endpoint,
             );
             if !ep_rl.allowed {
-                // Rate limited — пробуем следующий
+                // Rate limited — try next
                 let key_copy = ep_key.clone();
                 prometheus::RATE_LIMIT_HITS.with_label_values(&["endpoint", &masked_ep_key]).inc();
                 tracing::debug!(endpoint = %key_copy, "Endpoint rate limited, trying next");
                 tried_keys.insert(key_copy);
-                // Переход к следующему эндпоинту
+                // Move to next endpoint
                 match state.router.select_available(&canonical_model, &banned_keys, &tried_keys) {
                     Some(ep) => current_endpoint = ep,
                     None => {
@@ -541,14 +541,14 @@ pub async fn proxy_handler(
                 }
 
                 if upstream_status < 400 || !should_retry {
-                    // Успех или не-retryable ошибка → возвращаем клиенту
+                    // Success or non-retryable error → return to client
                     let latency_ms = latency.as_millis() as u64;
                     state.monitoring.health_store.record_request(&ep_key);
                     state.monitoring.health_store.record_latency(&ep_key, latency_ms);
 
                     if let Some(sid) = &session_id {
                         state.session.sticky.set(sid, current_endpoint.index);
-                        // Синхронизируем sticky в Redis (fire-and-forget)
+                        // Sync sticky to Redis (fire-and-forget)
                         let sync = state.limits.sync.clone();
                         let sid_clone = sid.clone();
                         let idx = current_endpoint.index;
@@ -600,13 +600,13 @@ pub async fn proxy_handler(
                         return resp;
                     }
 
-                    // Читаем тело для извлечения usage и Anthropic-перевода
+                    // Read body to extract usage and translate Anthropic
                     let resp_body_bytes = axum::body::to_bytes(
                         std::mem::replace(resp.body_mut(), axum::body::Body::empty()),
                         1024 * 1024,
                     ).await.unwrap_or_default();
 
-                    // Парсим JSON-ответ для нормализации и извлечения usage
+                    // Parse JSON response for normalization and usage extraction
                     let mut upstream_json = serde_json::from_slice::<serde_json::Value>(&resp_body_bytes).ok();
 
                     let (tokens_prompt, tokens_completion) = upstream_json
@@ -625,7 +625,7 @@ pub async fn proxy_handler(
                         })
                         .unwrap_or((0, 0));
 
-                    // Пост-фактное списание TPM на основе реального usage из upstream
+                    // Post-factum TPM deduction based on real usage from upstream
                     let total_tokens = tokens_prompt.saturating_add(tokens_completion);
                     if total_tokens > 1 {
                         let cfg = state.config.load();
@@ -645,12 +645,12 @@ pub async fn proxy_handler(
                         }
                     }
 
-                    // Нормализуем ответ к строгому OpenAI-формату (как LiteLLM)
+                    // Normalize response to strict OpenAI format (like LiteLLM)
                     if let Some(ref mut json) = upstream_json {
                         normalize_openai_response(json, &model_name);
                     }
 
-                    // Хеш токена для статистики
+                    // Token hash for stats
                     let token_hash = {
                         use std::hash::Hasher;
                         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -660,7 +660,7 @@ pub async fn proxy_handler(
 
                     state.live_stats.record_request(&token_key, &team, &ep_key);
 
-                    // Anthropic: перевести ответ OpenAI → Anthropic (до построения ответа)
+                    // Anthropic: translate OpenAI → Anthropic response (before building response)
                     if is_anthropic {
                         if let Some(ref openai_json) = upstream_json {
                             let anthropic_json = crate::proxy::anthropic::translate_response(&openai_json);
@@ -673,7 +673,7 @@ pub async fn proxy_handler(
                         }
                     }
 
-                    // Восстанавливаем тело (нормализованное JSON или оригинальные байты)
+                    // Restore body (normalized JSON or original bytes)
                     let resp_body_bytes = upstream_json
                         .and_then(|j| serde_json::to_vec(&j).ok())
                         .unwrap_or_else(|| resp_body_bytes.to_vec());
@@ -689,7 +689,7 @@ pub async fn proxy_handler(
                         insert_header(headers, "x-cost-completion-per-1m", &current_endpoint.cost_completion.to_string());
                     }
 
-                    // Fire-and-forget: запись статистики в БД
+                    // Fire-and-forget: write stats to DB
                     let stats = state.monitoring.stats.clone();
                     let model = canonical_model.clone();
                     let ep_url = current_endpoint.url.clone();
@@ -705,7 +705,7 @@ pub async fn proxy_handler(
                     return resp;
                 }
 
-                // Retryable ошибка — пробуем следующий
+                // Retryable error — try next endpoint
                 let key_copy = ep_key.clone();
                 tracing::info!(
                     status = upstream_status,
@@ -756,11 +756,11 @@ pub async fn proxy_handler(
             }
         }
 
-        // Ищем следующий эндпоинт
+        // Look for next endpoint
         match state.router.select_available(&canonical_model, &banned_keys, &tried_keys) {
             Some(ep) => current_endpoint = ep,
             None => {
-                // Все перебрали — возвращаем последнюю ошибку
+                // All tried — return last error
                 prometheus::REQUEST_COUNT
                     .with_label_values(&[&canonical_model, "router", "all_failed"])
                     .inc();
@@ -777,7 +777,7 @@ pub async fn proxy_handler(
     }
 }
 
-// ── Вспомогательные функции ────────────────────────────────────────────
+// ── Helper functions ─────────────────────────────────────────────────
 
 fn build_selected_endpoint(ep: &crate::config::EndpointConfig, index: usize, total: usize) -> SelectedEndpoint {
     SelectedEndpoint {
@@ -801,7 +801,7 @@ fn insert_header(headers: &mut axum::http::HeaderMap, name: &str, value: &str) {
     }
 }
 
-/// Читаем тело запроса и парсим JSON (единоразово)
+/// Read request body and parse JSON (once)
 async fn read_body_and_parse(req: Request<Body>) -> Result<(Vec<u8>, serde_json::Value), Response> {
     let bytes = axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024)  // 50MB hard cap
         .await
@@ -820,7 +820,7 @@ fn get_session_id(body: &[u8]) -> Option<String> {
         .and_then(|v| v.get("x-sticky-session-id").and_then(|s| s.as_str().map(String::from)))
 }
 
-/// Обычное (не-streaming) проксирование
+/// Regular (non-streaming) proxying
 async fn proxy_regular(
     client: &Client,
     url: &str,
@@ -939,7 +939,7 @@ fn mask_key(key: &str) -> String {
     format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }
 
-/// Найти границу между SSE-событиями (два подряд \n).
+/// Find the boundary between SSE events (two consecutive \n).
 fn find_double_newline(data: &[u8]) -> Option<usize> {
     for i in 0..data.len().saturating_sub(1) {
         if data[i] == b'\n' && data[i + 1] == b'\n' {
@@ -949,7 +949,7 @@ fn find_double_newline(data: &[u8]) -> Option<usize> {
     None
 }
 
-/// Собрать OpenAI-совместимый ответ с заголовками при превышении rate limit.
+/// Build an OpenAI-compatible response with headers when rate limit is exceeded.
 pub fn rate_limit_response(rl: &ratelimit::RateLimitResult, scope: &str) -> Response {
     let body = serde_json::json!({
         "error": {
@@ -966,7 +966,7 @@ pub fn rate_limit_response(rl: &ratelimit::RateLimitResult, scope: &str) -> Resp
     let mut resp = (StatusCode::TOO_MANY_REQUESTS, axum::Json(body)).into_response();
 
     let headers = resp.headers_mut();
-    // Стандартные заголовки rate limit
+    // Standard rate limit headers
     insert_header(headers, "x-ratelimit-limit-requests", &rl.limit.to_string());
     insert_header(headers, "x-ratelimit-remaining-requests", "0");
     insert_header(
@@ -974,7 +974,7 @@ pub fn rate_limit_response(rl: &ratelimit::RateLimitResult, scope: &str) -> Resp
         "x-ratelimit-reset-requests",
         &format!("{:.1}", rl.reset_after_secs),
     );
-    // Дополнительные TPM-заголовки
+    // Additional TPM headers
     insert_header(headers, "x-ratelimit-limit-tokens", &rl.limit.to_string());
     insert_header(headers, "x-ratelimit-remaining-tokens", "0");
     insert_header(
@@ -1095,22 +1095,22 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_str(raw).unwrap();
         normalize_openai_response(&mut json, "coder36");
 
-        // model должен быть заменён на запрошенное имя
+        // model should be replaced with the requested name
         assert_eq!(json["model"], "coder36");
 
-        // нестандартные поля на корне удалены
+        // non-standard root fields removed
         assert!(json.get("prompt_logprobs").is_none());
         assert!(json.get("kv_transfer_params").is_none());
         assert!(json.get("prompt_token_ids").is_none());
 
-        // нестандартные поля в choice удалены
+        // non-standard choice fields removed
         let choice = &json["choices"][0];
         assert!(choice.get("stop_reason").is_none());
         assert!(choice.get("token_ids").is_none());
         assert!(choice.get("provider_specific_fields").is_none());
         assert!(choice["message"].get("provider_specific_fields").is_none());
 
-        // стандартные поля сохранены
+        // standard fields preserved
         assert_eq!(choice["finish_reason"], "stop");
         assert_eq!(choice["message"]["content"], "hi");
         assert_eq!(json["usage"]["total_tokens"], 15);
@@ -1180,7 +1180,7 @@ pub async fn proxy_generic(
         let stream = json.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
         (bytes, model, stream)
     } else {
-        // Non-JSON body — для multipart парсим поле model из формы
+        // Non-JSON body — for multipart parse model field from form
         let bytes = match axum::body::to_bytes(req.into_body(), 50 * 1024 * 1024).await {
             Ok(b) => b.to_vec(),
             Err(e) => return json_error(
@@ -1199,7 +1199,7 @@ pub async fn proxy_generic(
 
         let model = model
             .or_else(|| {
-                // Fallback: ищем модель нужного типа из пути
+                // Fallback: find model of required type from path
                 let model_type = req_path_type(&req_path);
                 cfg.models.iter()
                     .find(|m| m.model_type == model_type)
@@ -1545,7 +1545,7 @@ async fn proxy_raw(
     Ok(response.body(Body::from_stream(byte_stream))?)
 }
 
-/// Определить тип модели по пути запроса
+/// Determine model type by request path
 fn req_path_type(path: &str) -> &str {
     if path.contains("/audio/") { "audio" }
     else if path.contains("/embeddings") { "embedding" }
@@ -1554,9 +1554,9 @@ fn req_path_type(path: &str) -> &str {
     else { "chat" }
 }
 
-/// Извлечь имя модели из multipart/form-data поля "model"
+/// Extract model name from multipart/form-data field "model"
 fn parse_multipart_model(body: &[u8], content_type: &str) -> Option<String> {
-    // Извлекаем boundary из Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
+    // Extract boundary from Content-Type: multipart/form-data; boundary=----WebKitFormBoundary
     let boundary = content_type
         .split("boundary=")
         .nth(1)?
@@ -1564,13 +1564,13 @@ fn parse_multipart_model(body: &[u8], content_type: &str) -> Option<String> {
         .trim_matches('"');
     let _boundary = boundary;
 
-    // Ищем поле model в теле по упрощённому алгоритму (без полноценного парсинга)
-    // Мультипарт структура: --boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nVALUE\r\n
+    // Find model field in body using a simplified algorithm (without full parsing)
+    // Multipart structure: --boundary\r\nContent-Disposition: form-data; name="model"\r\n\r\nVALUE\r\n
     let model_marker = format!("name=\"model\"");
     let body_str = String::from_utf8_lossy(body);
     let pos = body_str.find(&model_marker)?;
 
-    // После marker идёт \r\n\r\n, затем значение до \r\n
+    // After marker comes \r\n\r\n, then value until \r\n
     let after_marker = &body_str[pos + model_marker.len()..];
     let value_start = after_marker.find("\r\n\r\n")? + 4;
     let value_end = after_marker[value_start..].find('\r')?;

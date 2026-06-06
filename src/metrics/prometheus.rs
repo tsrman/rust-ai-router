@@ -5,7 +5,7 @@ use prometheus::{
 };
 
 lazy_static! {
-    /// Счётчик запросов по модели, эндпоинту, статусу
+    /// Request counter by model, endpoint, status
     pub static ref REQUEST_COUNT: IntCounterVec = register_int_counter_vec!(
         "openai_router_requests_total",
         "Total requests",
@@ -13,7 +13,7 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Гистограмма latency
+    /// Latency histogram
     pub static ref REQUEST_LATENCY: HistogramVec = register_histogram_vec!(
         "openai_router_request_latency_seconds",
         "Request latency in seconds",
@@ -22,14 +22,14 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Количество забаненных эндпоинтов
+    /// Number of banned endpoints
     pub static ref BANNED_ENDPOINTS: IntGauge = register_int_gauge!(
         "openai_router_banned_endpoints",
         "Number of currently banned endpoints"
     )
     .unwrap();
 
-    /// Количество rate limit hits
+    /// Number of rate limit hits
     pub static ref RATE_LIMIT_HITS: IntCounterVec = register_int_counter_vec!(
         "openai_router_rate_limit_hits_total",
         "Rate limit hits",
@@ -37,7 +37,7 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Потреблённые токены
+    /// Consumed tokens
     pub static ref TOKENS_CONSUMED: IntCounterVec = register_int_counter_vec!(
         "openai_router_tokens_consumed_total",
         "Tokens consumed",
@@ -60,7 +60,7 @@ lazy_static! {
     .unwrap();
 }
 
-/// Принудительно инициализировать все метрики (чтобы /metrics не был пустым)
+/// Force-initialize all metrics (so /metrics is not empty)
 pub fn init() {
     let _ = &*REQUEST_COUNT;
     let _ = &*REQUEST_LATENCY;

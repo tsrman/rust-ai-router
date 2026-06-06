@@ -1,13 +1,13 @@
 use dashmap::DashMap;
 use std::time::Instant;
 
-/// Запись о sticky-сессии
+/// Sticky session entry
 struct StickyEntry {
     endpoint_index: usize,
     last_access: Instant,
 }
 
-/// Хранилище session-sticky привязок
+/// Session-sticky affinity store
 pub struct SessionStickyStore {
     sessions: DashMap<String, StickyEntry>,
     ttl_secs: u64,
@@ -21,20 +21,20 @@ impl SessionStickyStore {
         }
     }
 
-    /// Получить индекс эндпоинта для сессии (если ещё жив)
+    /// Get endpoint index for a session (if still alive)
     pub fn get(&self, session_id: &str) -> Option<usize> {
         if let Some(entry) = self.sessions.get(session_id) {
             if entry.last_access.elapsed().as_secs() < self.ttl_secs {
                 return Some(entry.endpoint_index);
             }
-            // TTL истёк — удаляем
+            // TTL expired — remove
             drop(entry);
             self.sessions.remove(session_id);
         }
         None
     }
 
-    /// Привязать сессию к конкретному эндпоинту
+    /// Bind a session to a specific endpoint
     pub fn set(&self, session_id: &str, endpoint_index: usize) {
         self.sessions.insert(
             session_id.to_string(),
@@ -45,14 +45,14 @@ impl SessionStickyStore {
         );
     }
 
-    /// Продлить TTL сессии (touch)
+    /// Extend session TTL (touch)
     pub fn touch(&self, session_id: &str) {
         if let Some(mut entry) = self.sessions.get_mut(session_id) {
             entry.last_access = Instant::now();
         }
     }
 
-    /// Очистить истёкшие сессии
+    /// Clean up expired sessions
     #[allow(dead_code)]
     pub fn cleanup(&self) {
         let now = Instant::now();

@@ -1,4 +1,4 @@
-/// Маскировать API-ключ для логов: показывает первые 4 и последние 4 символа
+/// Mask API key for logs: shows first 4 and last 4 characters
 pub fn mask_key(key: &str) -> String {
     if key.len() <= 8 {
         return "***".into();
@@ -6,7 +6,7 @@ pub fn mask_key(key: &str) -> String {
     format!("{}...{}", &key[..4], &key[key.len() - 4..])
 }
 
-/// Маскировать Redis URL для логов: скрывает пароль после @
+/// Mask Redis URL for logs: hides password after @
 pub fn mask_redis_url(url: &str) -> String {
     if let Some(at) = url.find('@') {
         format!("redis://***@{}", &url[at + 1..])
@@ -15,8 +15,8 @@ pub fn mask_redis_url(url: &str) -> String {
     }
 }
 
-/// Частично маскирует endpoint URL: скрывает поддомен / IP и каждый
-/// сегмент path (первые 4 + последние 4 символа, как у API-ключа).
+/// Partially mask an endpoint URL: hides subdomain / IP and each
+/// path segment (first 4 + last 4 characters, like API key).
 pub fn mask_endpoint_url(url: &str) -> String {
     use std::net::IpAddr;
 
@@ -113,7 +113,7 @@ mod tests {
     }
 }
 
-/// Сформировать OpenAI-совместимый JSON-ответ с ошибкой
+/// Build an OpenAI-compatible JSON error response
 pub fn json_error(
     status: axum::http::StatusCode,
     message: &str,

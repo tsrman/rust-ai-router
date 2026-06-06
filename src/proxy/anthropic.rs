@@ -1,13 +1,13 @@
-//! Трансляция Anthropic API ↔ OpenAI API.
+//! Anthropic API ↔ OpenAI API translation.
 //!
-//! Клиенты отправляют запросы в формате Anthropic (`/v1/messages`),
-//! роутер преобразует их в OpenAI формат, проксирует к upstream,
-//! и преобразует ответ обратно в Anthropic формат.
+//! Clients send requests in Anthropic format (`/v1/messages`),
+//! the router converts them to OpenAI format, proxies to upstream,
+//! and converts the response back to Anthropic format.
 
 use serde_json::{json, Value};
 
-/// Перевести тело запроса из Anthropic Messages API в OpenAI Chat Completions.
-/// Возвращает изменённый JSON и извлечённое имя модели.
+/// Translate request body from Anthropic Messages API to OpenAI Chat Completions.
+/// Returns the modified JSON and the extracted model name.
 pub fn translate_request(body: &Value) -> (Value, String) {
     let model = body
         .get("model")
@@ -20,18 +20,18 @@ pub fn translate_request(body: &Value) -> (Value, String) {
         "messages": [],
     });
 
-    // Перенос system в messages
+    // Move system into messages
     if let Some(system) = body.get("system").and_then(|v| v.as_str()) {
         if let Some(arr) = openai["messages"].as_array_mut() {
             arr.push(json!({"role": "system", "content": system}));
         }
     }
 
-    // Перенос messages
+    // Move messages
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
         for msg in messages {
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-            // Anthropic использует content как строку или массив блоков
+            // Anthropic uses content as a string or an array of blocks
             let content = msg.get("content");
             if let Some(arr) = openai["messages"].as_array_mut() {
                 arr.push(json!({"role": role, "content": content}));
@@ -39,7 +39,7 @@ pub fn translate_request(body: &Value) -> (Value, String) {
         }
     }
 
-    // Параметры, совпадающие 1:1
+    // Parameters that map 1:1
     for field in &["max_tokens", "temperature", "top_p", "stream"] {
         if let Some(val) = body.get(field) {
             openai[field] = val.clone();
@@ -51,15 +51,15 @@ pub fn translate_request(body: &Value) -> (Value, String) {
         openai["stop"] = stop.clone();
     }
 
-    // Сохраняем оригинальный запрос для обратной трансляции
+    // Save the original request for reverse translation
     openai["__anthropic_request"] = body.clone();
 
     (openai, model)
 }
 
-/// Перевести ответ из OpenAI Chat Completions в Anthropic Messages API.
+/// Translate response from OpenAI Chat Completions to Anthropic Messages API.
 pub fn translate_response(openai_resp: &Value) -> Value {
-    // Извлекаем сохранённый оригинальный запрос
+    // Extract the saved original request
     let _original = openai_resp.get("__anthropic_request");
 
     let choice = openai_resp
@@ -116,7 +116,7 @@ pub fn translate_response(openai_resp: &Value) -> Value {
     anthropic
 }
 
-/// Определить, является ли запрос Anthropic-форматом (по URL пути).
+/// Determine if the request is in Anthropic format (by URL path).
 pub fn is_anthropic_request(path: &str) -> bool {
     path.ends_with("/v1/messages")
 }

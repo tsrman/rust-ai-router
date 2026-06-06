@@ -7,17 +7,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Результат проверки rate limit
+/// Rate limit check result
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct RateLimitResult {
-    /// Запрос разрешён?
+    /// Request allowed?
     pub allowed: bool,
-    /// Лимит (RPM или TPM), который был превышен. 0 = unlimited.
+    /// Limit (RPM or TPM) that was exceeded. 0 = unlimited.
     pub limit: u64,
-    /// Через сколько секунд можно повторить. 0 = можно сейчас.
+    /// Seconds until retry is possible. 0 = can retry now.
     pub reset_after_secs: f64,
-    /// Ключ лимитера (для заголовков)
+    /// Limiter key (for headers)
     pub scope: RateLimitScope,
 }
 
@@ -27,7 +27,7 @@ pub enum RateLimitScope {
     Endpoint,
 }
 
-/// Кастомный token-bucket для TPM с поддержкой пост-фактного списания.
+/// Custom token bucket for TPM with post-factum deduction support.
 struct TpmLimiter {
     capacity: u64,
     state: Mutex<TpmState>,
@@ -57,7 +57,7 @@ impl TpmLimiter {
         }
     }
 
-    /// Пополнить бакет пропорционально прошедшему времени (1 minute window).
+    /// Refill the bucket proportionally to elapsed time (1 minute window).
     fn refill(state: &mut TpmState, capacity: u64) {
         let now = Instant::now();
         let elapsed_ms = now.duration_since(state.last_update).as_millis() as u64;
@@ -70,7 +70,7 @@ impl TpmLimiter {
         }
     }
 
-    /// Проверить и атомарно списать n токенов.
+    /// Check and atomically deduct n tokens.
     fn check_n(&self, n: u64) -> Result<(), RateLimitWait> {
         let mut s = self.state.lock();
         Self::refill(&mut s, self.capacity);
@@ -97,8 +97,8 @@ impl TpmLimiter {
         }
     }
 
-    /// Пост-фактное списание: пополняем бакет и принудительно уменьшаем на n.
-    /// Баланс может уйти в минус — следующие запросы будут заблокированы до пополнения.
+    /// Post-factum deduction: refill the bucket and forcibly reduce by n.
+    /// Balance may go negative — subsequent requests will be blocked until refill.
     fn consume_n(&self, n: u64) {
         let mut s = self.state.lock();
         Self::refill(&mut s, self.capacity);
@@ -113,15 +113,15 @@ impl TpmLimiter {
         }
     }
 
-    /// Текущий остаток токенов (может быть отрицательным при овердрафте).
+    /// Current token balance (may be negative on overdraft).
     fn remaining(&self) -> i64 {
         let mut s = self.state.lock();
         Self::refill(&mut s, self.capacity);
         s.tokens
     }
 
-    /// Консервативный remaining для stats: capacity минус consumed за последние 60 секунд.
-    /// Не зависит от refill — показывает реальное потребление за окно.
+    /// Conservative remaining for stats: capacity minus consumed in the last 60 seconds.
+    /// Independent of refill — shows real consumption for the window.
     fn window_remaining(&self) -> i64 {
         let mut s = self.state.lock();
         let now = Instant::now();
@@ -138,7 +138,7 @@ struct RateLimitWait {
     wait_secs: f64,
 }
 
-/// Два rate limiter'а: RPM и TPM
+/// Two rate limiters: RPM and TPM
 struct RateLimitPair {
     rpm: GovernorLimiter<String, dashmap::DashMap<String, governor::state::InMemoryState>, governor::clock::DefaultClock, governor::middleware::NoOpMiddleware>,
     tpm: TpmLimiter,
@@ -172,7 +172,7 @@ fn unix_now() -> u64 {
         .as_secs()
 }
 
-/// Хранилище rate limiter'ов по ключам
+/// Rate limiter store keyed by strings
 pub struct RateLimiterStore {
     limiters: DashMap<String, Arc<RateLimitPair>>,
 }
@@ -191,9 +191,9 @@ impl RateLimiterStore {
             .clone()
     }
 
-    /// Проверить RPM + TPM. Возвращает результат с деталями.
+    /// Check RPM + TPM. Returns a result with details.
     pub fn check(&self, key: &str, rpm: u32, tpm: u64, estimated_tokens: u64, scope: RateLimitScope) -> RateLimitResult {
-        // RPM проверка
+        // RPM check
         if rpm > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
             pair.touch();
@@ -211,7 +211,7 @@ impl RateLimiterStore {
             }
         }
 
-        // TPM проверка (атомарно — check_key_n для N токенов)
+        // TPM check (atomic — check_key_n for N tokens)
         if tpm > 0 && estimated_tokens > 0 {
             let pair = self.get_or_create(key, rpm, tpm);
             pair.touch();
@@ -237,8 +237,8 @@ impl RateLimiterStore {
         }
     }
 
-    /// Пост-фактное списание TPM на основе реального usage из upstream-ответа.
-    /// Вызывать после успешного проксирования.
+    /// Post-factum TPM deduction based on actual usage from the upstream response.
+    /// Call after successful proxying.
     pub fn consume_tpm(&self, key: &str, tpm: u64, tokens: u64) {
         if tpm == 0 || tokens == 0 {
             return;
@@ -248,10 +248,10 @@ impl RateLimiterStore {
         pair.tpm.consume_n(tokens);
     }
 
-    /// Получить текущее состояние TPM: (limit, remaining).
-    /// Возвращает (0, 0) если лимит не задан.
-    /// Использует window_remaining — capacity минус consumed за последние 60 секунд,
-    /// не зависит от bucket refill.
+    /// Get current TPM state: (limit, remaining).
+    /// Returns (0, 0) if limit is not set.
+    /// Uses window_remaining — capacity minus consumed in the last 60 seconds,
+    /// independent of bucket refill.
     pub fn get_tpm_state(&self, key: &str, tpm: u64) -> (u64, i64) {
         if tpm == 0 {
             return (0, 0);
@@ -323,24 +323,24 @@ mod tests {
     #[test]
     fn test_tpm_consume_reduces_future_budget() {
         let store = RateLimiterStore::new();
-        // TPM=10. Предварительная проверка на 1 токен.
+        // TPM=10. Pre-check for 1 token.
         assert!(store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
-        // Пост-факт списание ещё 8 токенов (итого 9)
+        // Post-factum deduction of another 8 tokens (total 9)
         store.consume_tpm("tpm-consume", 10, 8);
-        // Остался 1 токен — проходит
+        // 1 token left — passes
         assert!(store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
-        // 11-й токен — блок
+        // 11th token — blocked
         assert!(!store.check("tpm-consume", 0, 10, 1, RateLimitScope::Token).allowed);
     }
 
     #[test]
     fn test_tpm_consume_can_overdraft() {
         let store = RateLimiterStore::new();
-        // TPM=5. Предварительно списываем 1.
+        // TPM=5. Pre-deduct 1.
         assert!(store.check("tpm-od", 0, 5, 1, RateLimitScope::Token).allowed);
-        // Пост-факт списание 10 токенов → уходим в овердрафт
+        // Post-factum deduction of 10 tokens → overdraft
         store.consume_tpm("tpm-od", 5, 10);
-        // Следующий запрос сразу блокируется, пока бакет не пополнится
+        // Next request is immediately blocked until bucket refills
         assert!(!store.check("tpm-od", 0, 5, 1, RateLimitScope::Token).allowed);
     }
 
@@ -349,30 +349,30 @@ mod tests {
         let store = RateLimiterStore::new();
         assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
         store.consume_tpm("tpm-zero", 5, 0);
-        // Бюджет не изменился (осталось 4)
+        // Budget unchanged (4 left)
         assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
         assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
         assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
         assert!(store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
-        // 5-й запрос — блок
+        // 5th request — blocked
         assert!(!store.check("tpm-zero", 0, 5, 1, RateLimitScope::Token).allowed);
     }
 
     #[test]
     fn test_tpm_consume_isolated_per_key() {
         let store = RateLimiterStore::new();
-        // key1: check 1 + consume 5 = 6 из 10
+        // key1: check 1 + consume 5 = 6 out of 10
         assert!(store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
         store.consume_tpm("key1", 10, 5);
-        // key2: независимый бюджет 10
+        // key2: independent budget of 10
         assert!(store.check("key2", 0, 10, 1, RateLimitScope::Token).allowed);
         store.consume_tpm("key2", 10, 5);
-        // key1 осталось 4 — 4 проходят
+        // key1 has 4 left — 4 pass
         for _ in 0..4 {
             assert!(store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
         }
         assert!(!store.check("key1", 0, 10, 1, RateLimitScope::Token).allowed);
-        // key2 тоже осталось 4
+        // key2 also has 4 left
         for _ in 0..4 {
             assert!(store.check("key2", 0, 10, 1, RateLimitScope::Token).allowed);
         }
@@ -382,15 +382,15 @@ mod tests {
     #[test]
     fn test_rpm_plus_tpm_with_consume() {
         let store = RateLimiterStore::new();
-        // RPM=2, TPM=10. Первый запрос проходит.
+        // RPM=2, TPM=10. First request passes.
         assert!(store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
-        // Пост-факт consume 5 → TPM осталось 4
+        // Post-fact consume 5 → TPM has 4 left
         store.consume_tpm("mixed", 10, 5);
-        // Второй запрос проходит по RPM и TPM
+        // Second request passes RPM and TPM
         assert!(store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
-        // consume ещё 3 → TPM осталось 1 (10 - 1 - 5 - 1 - 3 = 0)
+        // consume another 3 → TPM has 1 left (10 - 1 - 5 - 1 - 3 = 0)
         store.consume_tpm("mixed", 10, 3);
-        // RPM исчерпан (2/2), TPM тоже 0 — блок
+        // RPM exhausted (2/2), TPM also 0 — blocked
         assert!(!store.check("mixed", 2, 10, 1, RateLimitScope::Token).allowed);
     }
 
@@ -400,7 +400,7 @@ mod tests {
         let store = RateLimiterStore::new();
         let pair = store.get_or_create("recent", 1, 10);
         pair.touch();
-        // last_used должен быть свежим (в пределах пары секунд от now)
+        // last_used should be recent (within a few seconds of now)
         let now = unix_now();
         let last = pair.last_used.load(Ordering::Relaxed);
         assert!(now >= last && now - last < 5, "last_used should be recent");
@@ -409,34 +409,34 @@ mod tests {
     #[test]
     fn test_tpm_large_consume_blocks_subsequent() {
         let store = RateLimiterStore::new();
-        // TPM=100. check(1) → осталось 99
+        // TPM=100. check(1) → 99 left
         assert!(store.check("bulk", 0, 100, 1, RateLimitScope::Token).allowed);
-        // consume 99 → осталось 0
+        // consume 99 → 0 left
         store.consume_tpm("bulk", 100, 99);
-        // Следующий check(1) блокируется
+        // Next check(1) is blocked
         assert!(!store.check("bulk", 0, 100, 1, RateLimitScope::Token).allowed);
     }
 
     #[test]
     fn test_tpm_check_n_with_estimated_greater_than_one() {
         let store = RateLimiterStore::new();
-        // TPM=10, estimated_tokens=4 → проходит (осталось 6)
+        // TPM=10, estimated_tokens=4 → passes (6 left)
         assert!(store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
-        // estimated_tokens=4 → проходит (осталось 2)
+        // estimated_tokens=4 → passes (2 left)
         assert!(store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
-        // estimated_tokens=4 → блок (нужно 4, осталось 2)
+        // estimated_tokens=4 → blocked (needs 4, 2 left)
         assert!(!store.check("est", 0, 10, 4, RateLimitScope::Token).allowed);
-        // consume не меняет ключ
+        // consume does not change key
         store.consume_tpm("est", 10, 1);
-        // estimated_tokens=1 → проходит (осталось 1)
+        // estimated_tokens=1 → passes (1 left)
         assert!(store.check("est", 0, 10, 1, RateLimitScope::Token).allowed);
-        // Больше ничего
+        // Nothing more left
         assert!(!store.check("est", 0, 10, 1, RateLimitScope::Token).allowed);
     }
 }
 
 impl RateLimiterStore {
-    /// Периодическая очистка неактивных записей (вызывать в фоне)
+    /// Periodic cleanup of inactive entries (call in background)
     pub fn start_cleanup(store: Arc<Self>) {
         tokio::spawn(async move {
             loop {

@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::config::AppConfig;
 
-/// Контекст аутентификации, сохраняемый в request extensions
+/// Authentication context stored in request extensions
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AuthContext {
@@ -20,8 +20,8 @@ pub struct AuthContext {
     pub cost_multiplier: f64,
 }
 
-/// Middleware для проверки Bearer-токена.
-/// Health/metrics эндпоинты пропускаются без аутентификации.
+/// Middleware for Bearer token verification.
+/// Health/metrics endpoints are skipped without authentication.
 pub async fn auth_middleware(
     State(config): State<Arc<ArcSwap<AppConfig>>>,
     mut req: Request,

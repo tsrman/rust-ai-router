@@ -6,9 +6,9 @@ use axum::{
 };
 use std::time::Duration;
 
-/// Middleware для таймаута обработки запроса.
-/// Принимает `State<Duration>` — максимальное время обработки.
-/// При превышении возвращает 504 Gateway Timeout.
+/// Middleware for request processing timeout.
+/// Accepts `State<Duration>` — maximum processing time.
+/// Returns 504 Gateway Timeout when exceeded.
 pub async fn timeout_middleware(
     State(timeout): State<Duration>,
     req: Request,

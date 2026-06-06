@@ -81,20 +81,20 @@ impl StatsWriter {
                      PRIMARY KEY (hour, team))"
                 ).execute(&pool).await.expect("CREATE TABLE team_usage_hourly");
 
-                // Курсор агрегации: хранит timestamp последней обработанной записи
+                // Aggregation cursor: stores the timestamp of the last processed record
                 sqlx::query(
                     "CREATE TABLE IF NOT EXISTS _aggregation_cursor (\
                      id INT PRIMARY KEY DEFAULT 1,\
                      last_ts TIMESTAMPTZ NOT NULL DEFAULT NOW())"
                 ).execute(&pool).await.ok();
-                // Инициализируем курсор, если его ещё нет
+                // Initialize the cursor if it doesn't exist yet
                 sqlx::query(
                     "INSERT INTO _aggregation_cursor (id, last_ts) \
                      VALUES (1, NOW() - INTERVAL '1 hour') \
                      ON CONFLICT DO NOTHING"
                 ).execute(&pool).await.ok();
 
-                // Миграция: добавить cost_approx в существующую таблицу requests
+                // Migration: add cost_approx to the existing requests table
                 sqlx::query(
                     "ALTER TABLE requests ADD COLUMN IF NOT EXISTS cost_approx DOUBLE PRECISION NOT NULL DEFAULT 0"
                 ).execute(&pool).await.ok();
@@ -115,7 +115,7 @@ impl StatsWriter {
                     .execute(&pool).await.ok();
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_requests_status_ts ON requests (status, timestamp DESC)")
                     .execute(&pool).await.ok();
-                // Индекс для batch-агрегации: быстрый range scan по timestamp
+                // Index for batch aggregation: fast range scan by timestamp
                 sqlx::query("CREATE INDEX IF NOT EXISTS idx_requests_ts_cost ON requests (timestamp, cost_approx)")
                     .execute(&pool).await.ok();
 
@@ -144,7 +144,7 @@ impl StatsWriter {
         }
     }
 
-    /// Только вставка в requests (без агрегации на лету — её делает фоновая задача)
+    /// Insert-only into requests (no on-the-fly aggregation — done by background task)
     pub async fn record_request(
         &self,
         model: &str,
@@ -185,7 +185,7 @@ impl StatsWriter {
         .await;
     }
 
-    /// Запустить фоновые задачи: очистка + batch-агрегация
+    /// Start background tasks: cleanup + batch aggregation
     pub fn start_background_tasks(self: &Arc<Self>) {
         // --- Cleanup ---
         if self.cleanup_interval_secs > 0 && self.retention_days > 0 && self.pool.is_some() {
@@ -196,7 +196,7 @@ impl StatsWriter {
             tracing::info!("Stats cleanup enabled: retention={retention}d, interval={interval}s");
 
             tokio::spawn(async move {
-                // Первый запуск через 60 секунд
+                // First run after 60 seconds
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 loop {
                     this.run_cleanup(retention).await;
@@ -218,7 +218,7 @@ impl StatsWriter {
             tracing::info!("Stats batch aggregation enabled: interval={interval}s");
 
             tokio::spawn(async move {
-                // Первый запуск через 90 секунд (после cleanup, чтобы не пересекались)
+                // First run after 90 seconds (after cleanup so they don't overlap)
                 tokio::time::sleep(std::time::Duration::from_secs(90)).await;
                 loop {
                     this.run_aggregation().await;
@@ -233,7 +233,7 @@ impl StatsWriter {
         }
     }
 
-    /// Удалить записи старше retention_days из всех таблиц
+    /// Delete records older than retention_days from all tables
     async fn run_cleanup(&self, retention_days: u32) {
         let pool = match &self.pool {
             Some(p) => p,
@@ -281,15 +281,15 @@ impl StatsWriter {
         }
     }
 
-    /// Batch-агрегация: собрать completed-часы из requests в _hourly таблицы.
-    /// Использует _aggregation_cursor для отслеживания обработанного диапазона.
+    /// Batch aggregation: collect completed hours from requests into _hourly tables.
+    /// Uses _aggregation_cursor to track the processed range.
     async fn run_aggregation(&self) {
         let pool = match &self.pool {
             Some(p) => p,
             None => return,
         };
 
-        // Начало транзакции
+        // Begin transaction
         let mut tx = match pool.begin().await {
             Ok(t) => t,
             Err(e) => {
@@ -298,7 +298,7 @@ impl StatsWriter {
             }
         };
 
-        // Читаем курсор
+        // Read cursor
         let last_ts: sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc> = match sqlx::query_scalar(
             "SELECT last_ts FROM _aggregation_cursor WHERE id = 1",
         )
@@ -312,14 +312,14 @@ impl StatsWriter {
             }
         };
 
-        // Агрегируем только завершённые часы (текущий час исключаем)
+        // Aggregate only completed hours (exclude the current hour)
         let end_ts = chrono::Utc::now()
             .with_minute(0).unwrap()
             .with_second(0).unwrap()
             .with_nanosecond(0).unwrap();
 
         if last_ts >= end_ts {
-            // Нет завершённых часов для агрегации
+            // No completed hours to aggregate
             tracing::debug!(
                 "Stats aggregation: nothing to aggregate (last_ts={last_ts}, end_ts={end_ts})"
             );
@@ -401,13 +401,13 @@ impl StatsWriter {
             Err(e) => tracing::error!("Stats aggregation team_usage_hourly error: {e}"),
         }
 
-        // Обновляем курсор
+        // Update cursor
         let _ = sqlx::query("UPDATE _aggregation_cursor SET last_ts = $1 WHERE id = 1")
             .bind(end_ts)
             .execute(&mut *tx)
             .await;
 
-        // Коммит
+        // Commit
         if let Err(e) = tx.commit().await {
             tracing::error!("Stats aggregation: commit failed: {e}");
         } else {

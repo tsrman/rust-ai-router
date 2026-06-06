@@ -3,13 +3,13 @@ use std::path::Path;
 
 use super::types::AppConfig;
 
-/// Загрузить конфигурацию из YAML-файла с подстановкой env-переменных.
-/// Поддерживает:
-///   - ${VAR} — обязательная переменная (ошибка если не задана)
-///   - ${VAR:-default} — с дефолтным значением
-///   - Загрузку .env файла (если есть)
+/// Load configuration from a YAML file with env variable substitution.
+/// Supports:
+///   - ${VAR} — required variable (error if not set)
+///   - ${VAR:-default} — with default value
+///   - Loading .env file (if present)
 pub fn load_config(path: &Path) -> Result<AppConfig> {
-    // Загружаем .env если есть (не критично)
+    // Load .env if present (non-critical)
     let _ = dotenvy::dotenv();
 
     let content =
@@ -23,8 +23,8 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
     Ok(config)
 }
 
-/// Подстановка env-переменных в строку.
-/// ${VAR} — обязательная, ${VAR:-default} — с дефолтом.
+/// Substitute env variables in a string.
+/// ${VAR} — required, ${VAR:-default} — with default.
 fn expand_env_vars(input: &str) -> Result<String> {
     let mut result = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -78,9 +78,9 @@ fn expand_env_vars(input: &str) -> Result<String> {
     Ok(result)
 }
 
-/// Базовая валидация конфига
+/// Basic config validation
 fn validate_config(config: &AppConfig) -> Result<()> {
-    // Проверяем, что все токены ссылаются на существующие команды
+    // Verify all tokens reference existing teams
     let team_names: Vec<&str> = config.teams.iter().map(|t| t.name.as_str()).collect();
 
     for token in &config.tokens {
@@ -93,7 +93,7 @@ fn validate_config(config: &AppConfig) -> Result<()> {
         }
     }
 
-    // Проверяем, что у каждой модели есть хотя бы один эндпоинт
+    // Verify every model has at least one endpoint
     for model in &config.models {
         if model.endpoints.is_empty() {
             anyhow::bail!("Model '{}' has no endpoints configured", model.name);

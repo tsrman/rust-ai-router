@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Корневая конфигурация приложения
+/// Root application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -25,15 +25,15 @@ pub struct AppConfig {
 pub struct ServerConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
-    /// Префикс пути (sub-URL), например "/rustrouter".
-    /// Все API-эндпоинты будут доступны по этому префиксу:
+    /// Path prefix (sub-URL), e.g. "/rustrouter".
+    /// All API endpoints will be available under this prefix:
     ///   /rustrouter/v1/models, /rustrouter/health, ...
-    /// Без префикса тоже работают (для обратной совместимости).
+    /// Works without prefix too (backward compatibility).
     #[serde(default)]
     pub base_path: String,
     #[serde(default)]
     pub timeouts: TimeoutConfig,
-    /// Максимальный размер тела запроса в байтах (по умолчанию 10MB)
+    /// Maximum request body size in bytes (default 10MB)
     #[serde(default = "default_max_body_size")]
     pub max_body_size: usize,
 }
@@ -44,22 +44,22 @@ fn default_listen() -> String {
     "0.0.0.0:8080".into()
 }
 
-/// Настройки таймаутов
+/// Timeout settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimeoutConfig {
-    /// Таймаут ожидания от клиента (keep-alive / idle), секунд. 0 = безлимит.
+    /// Client idle timeout (keep-alive), seconds. 0 = unlimited.
     #[serde(default = "default_client_idle")]
     pub client_idle_secs: u64,
-    /// Таймаут чтения тела запроса от клиента, секунд. 0 = безлимит.
+    /// Client request body read timeout, seconds. 0 = unlimited.
     #[serde(default = "default_client_read")]
     pub client_read_secs: u64,
-    /// Таймаут подключения к upstream, секунд.
+    /// Upstream connection timeout, seconds.
     #[serde(default = "default_upstream_connect")]
     pub upstream_connect_secs: u64,
-    /// Таймаут чтения ответа от upstream, секунд. Важно для streaming!
+    /// Upstream response read timeout, seconds. Important for streaming!
     #[serde(default = "default_upstream_read")]
     pub upstream_read_secs: u64,
-    /// Таймаут отправки запроса в upstream, секунд.
+    /// Upstream request write timeout, seconds.
     #[serde(default = "default_upstream_write")]
     pub upstream_write_secs: u64,
 }
@@ -82,7 +82,7 @@ impl Default for TimeoutConfig {
     }
 }
 
-/// Команда (группа пользователей)
+/// Team (user group)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeamConfig {
     pub name: String,
@@ -98,7 +98,7 @@ fn default_team_models() -> Vec<String> {
     vec!["*".into()]
 }
 
-/// Токен доступа (API ключ клиента)
+/// Access token (client API key)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenConfig {
     pub key: String,
@@ -109,7 +109,7 @@ pub struct TokenConfig {
     pub limits: Option<LimitsConfig>,
 }
 
-/// Лимиты RPM/TPM
+/// RPM/TPM limits
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LimitsConfig {
     #[serde(default)]
@@ -118,21 +118,21 @@ pub struct LimitsConfig {
     pub tpm: u64,
 }
 
-/// Модель с несколькими эндпоинтами
+/// Model with multiple endpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
     pub endpoints: Vec<EndpointConfig>,
-    /// Тип модели: chat (по умолчанию), audio, embedding, completions, rerank
+    /// Model type: chat (default), audio, embedding, completions, rerank
     #[serde(default = "default_model_type")]
     pub model_type: String,
 }
 
 fn default_model_type() -> String { "chat".into() }
 
-/// Эндпоинт (upstream API)
+/// Endpoint (upstream API)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EndpointConfig {
     pub url: String,
@@ -151,14 +151,14 @@ fn default_weight() -> u32 {
     1
 }
 
-/// Стоимость токенов (за 1M токенов)
+/// Token cost (per 1M tokens)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CostConfig {
     pub prompt: f64,
     pub completion: f64,
 }
 
-/// Настройки Fail2ban
+/// Fail2ban settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fail2banConfig {
     #[serde(default = "default_max_failures")]
@@ -167,19 +167,19 @@ pub struct Fail2banConfig {
     pub ban_duration_secs: u64,
     #[serde(default = "default_error_threshold")]
     pub error_threshold_pct: f64,
-    /// HTTP-статусы от upstream, которые считаются ошибкой.
-    /// Формат: точный код ("500", "429") или маска ("5xx" = все 5xx).
-    /// По умолчанию: ["5xx", "401", "403", "429"].
-    /// Сетевые ошибки (connection refused, timeout) учитываются всегда.
+    /// HTTP status codes from upstream that count as errors.
+    /// Format: exact code ("500", "429") or mask ("5xx" = all 5xx).
+    /// Default: ["5xx", "401", "403", "429"].
+    /// Network errors (connection refused, timeout) are always counted.
     #[serde(default = "default_fail_codes")]
     pub fail_status_codes: Vec<String>,
-    /// Интервал фоновой проверки забаненных эндпоинтов, секунд.
-    /// 0 = отключить проверку. По умолчанию: 30.
+    /// Background health check interval for banned endpoints, seconds.
+    /// 0 = disable check. Default: 30.
     #[serde(default = "default_health_check_interval")]
     pub health_check_interval_secs: u64,
-    /// Ретраить запрос на другие эндпоинты при ошибке (5xx, 429, сетевые).
-    /// true = при ошибке пробуем следующий эндпоинт, не возвращая 5xx клиенту.
-    /// По умолчанию: true.
+    /// Retry request on another endpoint upon error (5xx, 429, network).
+    /// true = on error try the next endpoint, don't return 5xx to client.
+    /// Default: true.
     #[serde(default = "default_retry_on_failure")]
     pub retry_on_failure: bool,
 }
@@ -194,10 +194,10 @@ fn default_health_check_interval() -> u64 {
 
 fn default_fail_codes() -> Vec<String> {
     vec![
-        "5xx".into(),   // Все 5xx
-        "401".into(),   // Невалидный API ключ
-        "403".into(),   // Доступ запрещён
-        "429".into(),   // Rate limit upstream
+        "5xx".into(),   // All 5xx
+        "401".into(),   // Invalid API key
+        "403".into(),   // Access denied
+        "429".into(),   // Upstream rate limit
     ]
 }
 
@@ -224,20 +224,20 @@ impl Default for Fail2banConfig {
     }
 }
 
-/// Статистика в PostgreSQL
+/// PostgreSQL statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatsConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub postgres_url: Option<String>,
-    /// Хранить записи N дней (по умолчанию 30, 0 = не чистить)
+    /// Keep records for N days (default 30, 0 = don't clean)
     #[serde(default = "default_retention_days")]
     pub retention_days: u32,
-    /// Интервал очистки в секундах (по умолчанию 3600 = 1 час, 0 = отключено)
+    /// Cleanup interval in seconds (default 3600 = 1 hour, 0 = disabled)
     #[serde(default = "default_cleanup_interval")]
     pub cleanup_interval_secs: u64,
-    /// Интервал batch-агрегации в секундах (по умолчанию 300 = 5 мин, 0 = отключено)
+    /// Batch aggregation interval in seconds (default 300 = 5 min, 0 = disabled)
     #[serde(default = "default_aggregation_interval")]
     pub aggregation_interval_secs: u64,
 }
@@ -258,7 +258,7 @@ impl Default for StatsConfig {
     }
 }
 
-/// Настройки session-sticky routing
+/// Session-sticky routing settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionConfig {
     #[serde(default = "default_sticky_ttl")]
@@ -277,7 +277,7 @@ impl Default for SessionConfig {
     }
 }
 
-/// Разрешённые лимиты для токена (с учётом наследования от команды)
+/// Effective token limits (with inheritance from team)
 #[derive(Debug, Clone)]
 pub struct EffectiveLimits {
     pub rpm: u32,
@@ -286,29 +286,29 @@ pub struct EffectiveLimits {
     pub cost_multiplier: f64,
 }
 
-/// Настройки синхронизации между экземплярами через Redis/Valkey
+/// Inter-instance synchronization via Redis/Valkey
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Режим подключения: "standalone" (по умолчанию) или "sentinel"
+    /// Connection mode: "standalone" (default) or "sentinel"
     #[serde(default = "default_sync_mode")]
     pub mode: String,
-    /// URL для standalone режима (обратная совместимость)
+    /// URL for standalone mode (backward compatibility)
     #[serde(default)]
     pub redis_url: Option<String>,
-    /// Список Sentinel-нод для режима sentinel
+    /// Sentinel nodes list for sentinel mode
     #[serde(default)]
     pub sentinel_nodes: Vec<String>,
-    /// Имя мастера в Sentinel
+    /// Master name in Sentinel
     #[serde(default)]
     pub sentinel_master_name: Option<String>,
-    /// Тип сервера: "master" (по умолчанию) или "replica"
+    /// Server type: "master" (default) or "replica"
     #[serde(default = "default_sentinel_server_type")]
     pub sentinel_server_type: String,
     #[serde(default = "default_sync_prefix")]
     pub key_prefix: String,
-    /// Если Redis недоступен: true = пропускать запросы без лимитов, false = отклонять
+    /// If Redis is unavailable: true = allow requests without limits, false = reject
     #[serde(default = "default_true")]
     pub fail_open: bool,
 }
@@ -337,7 +337,7 @@ impl Default for SyncConfig {
 }
 
 impl AppConfig {
-    /// Получить эффективные лимиты токена с учётом наследования от команды
+    /// Get effective token limits considering team inheritance
     pub fn resolve_token(&self, token_key: &str) -> Option<EffectiveLimits> {
         let token = self.tokens.iter().find(|t| t.key == token_key)?;
         let team = self.teams.iter().find(|t| t.name == token.team);
@@ -371,10 +371,10 @@ impl AppConfig {
         })
     }
 
-    /// Проверить, имеет ли токен доступ к модели
+    /// Check if a token has access to a model
     pub fn token_has_model_access(&self, token_key: &str, model: &str) -> bool {
         if let Some(eff) = self.resolve_token(token_key) {
-            // wildcard — доступ ко всем
+            // wildcard — access to all
             if eff.models.iter().any(|m| m == "*") {
                 return true;
             }
@@ -383,14 +383,14 @@ impl AppConfig {
         false
     }
 
-    /// Получить конфигурацию модели по имени (с учётом алиасов)
+    /// Get model config by name (with alias resolution)
     pub fn find_model(&self, model_name: &str) -> Option<&ModelConfig> {
         self.models
             .iter()
             .find(|m| m.name == model_name || m.aliases.iter().any(|a| a == model_name))
     }
 
-    /// Получить каноническое имя модели (разрешить алиас)
+    /// Get canonical model name (resolve alias)
     pub fn canonical_model_name(&self, model_name: &str) -> String {
         self.find_model(model_name)
             .map(|m| m.name.clone())
